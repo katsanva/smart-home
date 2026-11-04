@@ -90,7 +90,8 @@ function directories() {
 }
 
 # qBittorrent starts with a temporary password printed to its log. Replace it
-# with a generated one, so the space guard can log in, and set download paths.
+# with a generated one, so the space guard can log in, set download paths, and
+# let gluetun set the forwarded port from localhost without a login.
 function qbittorrent() {
   local temp password cookies body
   [ -z "$(get_value media/.env QBITTORRENT_PASSWORD)" ] || return 0
@@ -108,7 +109,8 @@ function qbittorrent() {
     --data-urlencode username=admin --data-urlencode password@- "$QBT_URL/api/v2/auth/login")" \
     && { [ -z "$body" ] || [ "$body" = "Ok." ]; } \
     && jq -cn --arg p "$password" '{web_ui_username: "admin", web_ui_password: $p,
-      save_path: "/data/downloads/complete", temp_path_enabled: true, temp_path: "/data/downloads/incomplete"}' \
+      save_path: "/data/downloads/complete", temp_path_enabled: true, temp_path: "/data/downloads/incomplete",
+      bypass_local_auth: true}' \
     | curl -sf -b "$cookies" --header "Referer: $QBT_URL" --data-urlencode json@- "$QBT_URL/api/v2/app/setPreferences"
   local status=$?
   rm -f "$cookies"
