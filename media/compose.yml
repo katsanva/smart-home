@@ -260,13 +260,15 @@ services:
   # http://ukr-torznab:8000/toloka and /utp; no host port. Scrapes Toloka
   # itself with the account below: the author's shared ElectricSQL feed
   # (the default) stopped updating, and the API only lists topics seen in the
-  # last 2 days. Built from source: the published image is amd64 only.
+  # last 2 days. Built from source: the published image is amd64 only. The fork
+  # adds the open upstream fixes (arm64 image, series year in UTP TV titles, UTP
+  # API key kept out of the request log); go back to upstream once they merge.
   # Needs a Toloka account, so it starts only with the ukr-torznab profile.
   ukr-torznab:
     profiles: [ukr-torznab]
     container_name: ukr-torznab
-    build: https://github.com/vanchaxy/ukr-torznab.git#a5d2487eaedb8059a0839d61a505b4ebe9edfbc7
-    image: ukr-torznab:a5d2487
+    build: https://github.com/katsanva/ukr-torznab.git#75c18c62b9dce5ee3243d81963f05134a94be3cc
+    image: ukr-torznab:75c18c6
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
     logging: *logging
     environment:
