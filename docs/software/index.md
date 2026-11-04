@@ -2,13 +2,9 @@
 
 This page describes my system setup. Here you can find software I rely on for running my smart home system.
 
-## Using Proxmox
+## Debian
 
-## Ubuntu LXC
-
-I use [Ubuntu](https://ubuntu.com/) as a primary OS for my Raspberry Pi. Ubuntu is a well-maintained Linux distribution with a huge community and large support forums.
-
-It officially [supports Raspberry Pi](https://ubuntu.com/download/raspberry-pi) and can be easily installed via the official Raspberry Pi Imager.
+The Raspberry Pi media host runs [Debian 13](https://www.debian.org/) (ARM64). See [Raspberry Pi media host](raspberry-pi.md).
 
 ## [Docker](https://www.docker.com/)
 

@@ -1,0 +1,12 @@
+# Pi status above the tiles. /data is the media disk, mounted read-only.
+- resources:
+    label: Pi
+    cpu: true
+    memory: true
+    cputemp: true
+    units: metric
+    uptime: true
+
+- resources:
+    label: Media disk
+    disk: /data

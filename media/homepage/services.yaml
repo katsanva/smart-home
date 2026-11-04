@@ -1,0 +1,67 @@
+# Homepage tiles: links open the HTTPS names served by Caddy (media/Caddyfile),
+# widgets reach each app inside the Docker network. Secrets come from media/.env
+# through HOMEPAGE_VAR_* variables (media/compose.yml).
+- Watch:
+    - Plex:
+        icon: plex.png
+        href: https://plex.{{HOMEPAGE_VAR_HOME_DOMAIN}}/web
+        widget:
+          type: plex
+          url: http://host.docker.internal:32400
+          key: '{{HOMEPAGE_VAR_PLEX_TOKEN}}'
+    - Seerr:
+        icon: jellyseerr.png
+        href: https://seerr.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: seerr
+          url: http://seerr:5055
+          key: '{{HOMEPAGE_VAR_SEERR_KEY}}'
+    - TorrServer:
+        icon: torrserver.png
+        href: https://torrserver.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+
+- Downloads:
+    - Radarr:
+        icon: radarr.png
+        href: https://radarr.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: radarr
+          url: http://radarr:7878
+          key: '{{HOMEPAGE_VAR_RADARR_KEY}}'
+          enableQueue: true
+    - Sonarr:
+        icon: sonarr.png
+        href: https://sonarr.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: sonarr
+          url: http://sonarr:8989
+          key: '{{HOMEPAGE_VAR_SONARR_KEY}}'
+          enableQueue: true
+    - qBittorrent:
+        icon: qbittorrent.png
+        href: https://qbittorrent.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: qbittorrent
+          url: http://qbittorrent:8080
+          username: '{{HOMEPAGE_VAR_QBITTORRENT_USER}}'
+          password: '{{HOMEPAGE_VAR_QBITTORRENT_PASSWORD}}'
+          enableLeechProgress: true
+
+- Tools:
+    - Prowlarr:
+        icon: prowlarr.png
+        href: https://prowlarr.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: prowlarr
+          url: http://prowlarr:9696
+          key: '{{HOMEPAGE_VAR_PROWLARR_KEY}}'
+    - Bazarr:
+        icon: bazarr.png
+        href: https://bazarr.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+        widget:
+          type: bazarr
+          url: http://bazarr:6767
+          key: '{{HOMEPAGE_VAR_BAZARR_KEY}}'
+    - Cleanuparr:
+        icon: cleanuparr.png
+        href: https://cleanuparr.{{HOMEPAGE_VAR_HOME_DOMAIN}}

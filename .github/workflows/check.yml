@@ -1,0 +1,36 @@
+name: Check
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint scripts and render Compose stacks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Shellcheck
+        run: shellcheck --severity=warning bin/smart-home bin/backup bin/restore bin/space-guard bin/setup bin/postinstall install.sh tests/*.sh
+
+      - name: Wrapper tests
+        run: tests/smart-home.sh
+
+      - name: Render enabled stacks
+        run: tests/compose.sh
+
+      - name: Space guard
+        run: tests/space-guard.sh
+
+      - name: Setup tests
+        run: tests/setup.sh
+
+      - name: mDNS names
+        run: tests/mdns-aliases.sh
+
+      - name: Backup round trip
+        run: sudo apt-get update && sudo apt-get install -y age && tests/backup.sh

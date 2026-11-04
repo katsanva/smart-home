@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Configure the media host after `smart-home init`. Run by install.sh; safe to
+# re-run: filled-in values and existing directories are never overwritten.
+#
+# - Creates common.env and media/.env from their templates (TZ, PUID, PGID and
+#   paths from this host) and the media directories on the mounted disk.
+# - Installs the systemd units and starts the media stack.
+# - Sets a generated qBittorrent WebUI password and download paths, and stores
+#   the qBittorrent, Sonarr and Radarr credentials for the space guard and the
+#   Prowlarr API key for Homepage.
+# - Runs bin/postinstall to connect Radarr, Sonarr, qBittorrent and Prowlarr.
+# - Publishes <name>.local names for the web UIs and the "inbox" Samba share
+#   (media/smb.conf.in) when LAN_BIND_ADDRESS is set.
+# - Enables the space guard; enables backups when backup.env exists or
+#   BACKUP_RECIPIENT, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are given.
+#
+# Usage: SMART_HOME_DIR=... bin/setup
+# Optional env: MEDIA_VOLUME (default /srv/media), PLEX_CLAIM, BACKUP_RECIPIENT,
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+set -uo pipefail
+
+: "${SMART_HOME_DIR:?SMART_HOME_DIR is unset}"
+cd "$SMART_HOME_DIR" || exit 1
+MEDIA="${MEDIA_VOLUME:-/srv/media}"
+QBT_URL=http://127.0.0.1:8080
+
+function die() {
+  echo "setup: $*" >&2
+  exit 1
+}
+
+# Last value of KEY in FILE, without quotes or a trailing " #" comment
+function get_value() {
+  sed -n "s/^$2=//p" "$1" 2> /dev/null | tail -n 1 | sed 's/[[:space:]]#.*//; s/^["'"'"']//; s/["'"'"']$//'
+}
+
+# Set KEY=VALUE in FILE, replacing the existing line; keeps the file's mode
+function set_value() {
+  local tmp
+  tmp="$(KEY="$2" VALUE="$3" awk '
+    index($0, ENVIRON["KEY"] "=") == 1 { if (!done) print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; done = 1; next }
+    { print }
+    END { if (!done) print ENVIRON["KEY"] "=" ENVIRON["VALUE"] }' "$1")" || return 1
+  printf '%s\n' "$tmp" > "$1"
+}
+
+# Set KEY only while it is still empty
+function fill_value() {
+  [ -n "$(get_value "$1" "$2")" ] || set_value "$1" "$2" "$3"
+}
+
+function wait_for() {
+  local _
+  for _ in $(seq 1 60); do # up to 5 minutes
+    eval "$1" > /dev/null 2>&1 && return 0
+    sleep 5
+  done
+  return 1
+}
+
+function env_files() {
+  if [ ! -e common.env ]; then
+    (umask 077 && cp common.env.example common.env) || return 1
+    set_value common.env TZ "$(timedatectl show -p Timezone --value 2> /dev/null || echo Etc/UTC)"
+    set_value common.env PUID "$(id -u)"
+    set_value common.env PGID "$(id -g)"
+    set_value common.env DOCKER "$MEDIA/appdata"
+    echo "Created common.env"
+  fi
+  if [ ! -e media/.env ]; then
+    (umask 077 && cp media/.env.example media/.env) || return 1
+    set_value media/.env MEDIA_VOLUME "$MEDIA"
+    echo "Created media/.env"
+  fi
+  [ -z "${PLEX_CLAIM:-}" ] || fill_value media/.env PLEX_CLAIM "$PLEX_CLAIM"
+  fill_value media/.env POCKET_ID_ENCRYPTION_KEY "$(openssl rand -hex 32)"
+}
+
+# Bind mounts in media/compose.yml never create host paths, so create them here
+function directories() {
+  local d
+  for d in movies tv music transcode downloads downloads/incomplete downloads/complete inbox inbox/movies inbox/tv \
+    appdata appdata/plex appdata/qbittorrent appdata/seerr appdata/radarr appdata/sonarr \
+    appdata/prowlarr appdata/bazarr appdata/trailarr appdata/maintainerr appdata/agregarr \
+    appdata/caddy appdata/pocket-id appdata/tinyauth appdata/cleanuparr appdata/tautulli appdata/torrserver appdata/ukr-torznab appdata/audiobookshelf \
+    appdata/audiobookshelf/config appdata/audiobookshelf/metadata; do
+    [ -d "$MEDIA/$d" ] || sudo install -d -o "$(id -u)" -g "$(id -g)" "$MEDIA/$d" || return 1
+  done
+}
+
+# qBittorrent starts with a temporary password printed to its log. Replace it
+# with a generated one, so the space guard can log in, and set download paths.
+function qbittorrent() {
+  local temp password cookies body
+  [ -z "$(get_value media/.env QBITTORRENT_PASSWORD)" ] || return 0
+  wait_for "curl -sf $QBT_URL" || die "qBittorrent WebUI did not come up"
+  temp="$(sudo docker logs qbittorrent 2>&1 | sed -n 's/.*temporary password is provided for this session: //p' | tail -n 1)"
+  if [ -z "$temp" ]; then
+    echo "qBittorrent already has a password: set QBITTORRENT_USER and QBITTORRENT_PASSWORD in media/.env" >&2
+    return 0
+  fi
+  password="$(openssl rand -hex 16)" || return 1
+  cookies="$(mktemp)" || return 1
+  # Passwords go through stdin, never process arguments. qBittorrent 5 answers
+  # a login with 204 and no body, older versions "Ok."; failures "Fails."
+  body="$(printf '%s' "$temp" | curl -sf -c "$cookies" --header "Referer: $QBT_URL" \
+    --data-urlencode username=admin --data-urlencode password@- "$QBT_URL/api/v2/auth/login")" \
+    && { [ -z "$body" ] || [ "$body" = "Ok." ]; } \
+    && jq -cn --arg p "$password" '{web_ui_username: "admin", web_ui_password: $p,
+      save_path: "/data/downloads/complete", temp_path_enabled: true, temp_path: "/data/downloads/incomplete"}' \
+    | curl -sf -b "$cookies" --header "Referer: $QBT_URL" --data-urlencode json@- "$QBT_URL/api/v2/app/setPreferences"
+  local status=$?
+  rm -f "$cookies"
+  [ "$status" -eq 0 ] || die "could not set the qBittorrent password"
+  set_value media/.env QBITTORRENT_USER admin
+  set_value media/.env QBITTORRENT_PASSWORD "$password"
+  echo "Set the qBittorrent WebUI login (admin, password in media/.env)"
+}
+
+# Sonarr, Radarr and Prowlarr write their API key to config.xml on first start
+function api_keys() {
+  local app key file docker
+  docker="$(get_value common.env DOCKER)"
+  for app in sonarr radarr prowlarr; do
+    [ -z "$(get_value media/.env "${app^^}_API_KEY")" ] || continue
+    file="$docker/$app/config.xml"
+    wait_for "sudo grep -q '<ApiKey>' '$file'" || die "$app did not write its API key"
+    key="$(sudo sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' "$file")"
+    set_value media/.env "${app^^}_API_KEY" "$key"
+    echo "Stored the $app API key"
+  done
+}
+
+function backups() {
+  if [ ! -e backup.env ]; then
+    if [ -z "${BACKUP_RECIPIENT:-}" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+      echo "Backups not enabled: re-run with BACKUP_RECIPIENT, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (docs/software/raspberry-pi.md)"
+      return 0
+    fi
+    (umask 077 && cp backup.env.example backup.env) || return 1
+    set_value backup.env BACKUP_RECIPIENT "$BACKUP_RECIPIENT"
+    set_value backup.env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+    set_value backup.env TELEGRAM_CHAT_ID "$TELEGRAM_CHAT_ID"
+    echo "Created backup.env"
+  fi
+  sudo systemctl enable --now smart-home-backup.timer
+}
+
+# <name>.local names (media/Caddyfile) need the LAN address the web UIs listen on
+function mdns() {
+  if [ -z "$(get_value media/.env LAN_BIND_ADDRESS)" ]; then
+    echo "LAN_BIND_ADDRESS is empty in media/.env: web UIs stay on 127.0.0.1 and no .local names are published"
+    return 0
+  fi
+  sudo systemctl enable --now smart-home-mdns.service
+}
+
+# The "inbox" share for adding media by hand, on the LAN address only
+function samba() {
+  local lan
+  lan="$(get_value media/.env LAN_BIND_ADDRESS)"
+  [ -n "$lan" ] || return 0
+  sed -e "s|LAN_BIND_ADDRESS|$lan|" -e "s|MEDIA_VOLUME|$MEDIA|" -e "s|SMB_USER|$(id -un)|" media/smb.conf.in \
+    | sudo tee /etc/samba/smb.conf > /dev/null || return 1
+  sudo systemctl restart smbd
+}
+
+function main() {
+  env_files || die "could not create the env files"
+  # Only the mounted media disk, never the SD card
+  findmnt --mountpoint "$MEDIA" > /dev/null \
+    || die "no disk mounted at $MEDIA: mount it (docs/software/raspberry-pi.md), then run the installer again"
+  directories || die "could not create the media directories"
+
+  "$SMART_HOME_DIR/bin/smart-home" install-units smart-home-media.service smart-home-alert@.service \
+    smart-home-space-guard.service smart-home-space-guard.timer \
+    smart-home-backup.service smart-home-backup.timer smart-home-mdns.service || die "could not install the systemd units"
+  echo "Starting the media stack (the first start pulls images)..."
+  sudo systemctl enable --now smart-home-media.service || die "the media stack did not start, see: journalctl -u smart-home-media"
+
+  qbittorrent
+  api_keys
+  "$SMART_HOME_DIR/bin/postinstall" || die "could not connect the media apps"
+  sudo systemctl enable --now smart-home-space-guard.timer || die "could not enable the space guard"
+  backups || die "could not enable backups"
+  mdns || die "could not publish the .local names"
+  samba || die "could not set up the inbox share"
+}
+
+main

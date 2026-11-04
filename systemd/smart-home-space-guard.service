@@ -1,0 +1,10 @@
+# Pauses grabs and downloads while the media disk is below 10% free (bin/space-guard)
+
+[Unit]
+Description=Smart Home media disk space guard
+After=smart-home-media.service
+
+[Service]
+Type=oneshot
+Environment=SMART_HOME_DIR=@SMART_HOME_DIR@
+ExecStart=@SMART_HOME_DIR@/bin/space-guard

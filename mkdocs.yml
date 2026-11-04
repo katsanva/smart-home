@@ -1,7 +1,7 @@
 site_name: Denys Dovhan Smart Home
 site_author: Denys Dovhan
 site_url: https://denysdovhan.com/smart-home
-site_description: ⚙️ My homelab and smart-home server built with Proxmox, Ubuntu, Docker
+site_description: ⚙️ My homelab and smart-home server built with Raspberry Pi, Debian, Docker
 
 copyright: 'Copyright &copy; 2024 Denys Dovhan'
 
@@ -54,6 +54,7 @@ nav:
   - Software:
       - software/index.md
       - software/getting-started.md
+      - software/raspberry-pi.md
       - software/docker.md
       - software/media.md
       - software/external-access.md

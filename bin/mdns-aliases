@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Publish <name>.local over mDNS for every site in media/Caddyfile.
+
+Each name is a CNAME to this host's own .local name, so lookups get its IPv4 and
+IPv6 answers at once (an alias with only an A record makes resolvers wait 5s
+for the missing AAAA). Runs until avahi drops the records; then exits non-zero
+and systemd/smart-home-mdns.service restarts it.
+
+Usage: SMART_HOME_DIR=... bin/mdns-aliases
+"""
+
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+CLASS_IN, TYPE_CNAME, TTL = 1, 5, 60
+# Avahi entry group states: uncommitted, registering, established
+HEALTHY = (0, 1, 2)
+
+
+def names(caddyfile):
+    return re.findall(r"^http://([a-z0-9-]+\.local)[ ,]", caddyfile.read_text(), re.M)
+
+
+def encode(name):
+    """Domain name in DNS wire format."""
+    return b"".join(bytes([len(label)]) + label.encode() for label in name.split(".")) + b"\0"
+
+
+def main():
+    import dbus
+
+    caddyfile = Path(os.environ["SMART_HOME_DIR"]) / "media" / "Caddyfile"
+    bus = dbus.SystemBus()
+    server = dbus.Interface(bus.get_object("org.freedesktop.Avahi", "/"), "org.freedesktop.Avahi.Server")
+    target = dbus.Array(encode(server.GetHostNameFqdn()), signature="y")
+    group = dbus.Interface(
+        bus.get_object("org.freedesktop.Avahi", server.EntryGroupNew()), "org.freedesktop.Avahi.EntryGroup"
+    )
+    for name in names(caddyfile):
+        group.AddRecord(
+            dbus.Int32(-1), dbus.Int32(-1), dbus.UInt32(0), name,
+            dbus.UInt16(CLASS_IN), dbus.UInt16(TYPE_CNAME), dbus.UInt32(TTL), target,
+        )
+    group.Commit()
+    # ponytail: polls the group state instead of running a GLib main loop
+    while group.GetState() in HEALTHY:
+        time.sleep(30)
+    sys.exit("mdns-aliases: avahi dropped the names (collision or failure)")
+
+
+if __name__ == "__main__":
+    main()

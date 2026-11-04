@@ -4,29 +4,29 @@
 # ARGUMENTS
 #
 
-if [ "$#" -gt 1 ]; then
+# First argument is a stack only when it names a directory with compose.yml
+if [ -n "$1" ] && [ -f "$SMART_HOME_DIR/$1/compose.yml" ]; then
   STACK="$1"
   STACK_DIR="$SMART_HOME_DIR/$STACK"
   COMMAND="$2"
-  shift 2
+  COMMAND_ARGS=("${@:3}")
 else
   COMMAND="$1"
-  shift 1
+  COMMAND_ARGS=("${@:2}")
 fi
-COMMAND_ARGS=("${@}")
 
 #
 # UTILS
 #
 
 function smart-home:utils:validate() {
-  if [ "$(type -t smart-home:command:"$COMMAND")" = function ]; then
-    return 0
-  elif [ -d "$STACK_DIR/compose.yml" ] \
-    && [ "$(type -t smart-home:docker:"$COMMAND")" = function ]; then
-    return 0
-  elif [ -z "$COMMAND" ]; then
-    smart-home:command:help
+  if [ -n "$STACK" ]; then
+    if [ -n "$COMMAND" ] && [ "$(type -t smart-home:docker:"$COMMAND")" = function ]; then
+      return 0
+    fi
+    echo "Unknown command for stack $STACK: $COMMAND"
+    return 1
+  elif [ "$(type -t smart-home:command:"$COMMAND")" = function ]; then
     return 0
   else
     echo "Unknown command: $COMMAND"
@@ -42,8 +42,37 @@ function smart-home:utils:back() {
   popd > /dev/null || exit 1 
 }
 
+# Enabled stacks come from $SMART_HOME_STACKS or common.env, space-separated
 function smart-home:utils:list_stacks() {
-  find . -maxdepth 2 -type f -name 'compose.yml' -printf '%h\n'
+  local stacks stack
+  stacks="${SMART_HOME_STACKS-$(sed -n 's/^SMART_HOME_STACKS=//p' "$SMART_HOME_DIR/common.env" 2> /dev/null | tail -n 1)}"
+  stacks="$(echo "$stacks" | sed 's/[[:space:]]#.*//; s/["'"'"']//g')"
+  if [ -z "${stacks// /}" ]; then
+    echo "No enabled stacks: set SMART_HOME_STACKS in common.env" >&2
+    return 1
+  fi
+  for stack in $stacks; do
+    if [ ! -f "$stack/compose.yml" ]; then
+      echo "Enabled stack has no compose.yml: $stack" >&2
+      return 1
+    fi
+    echo "$stack"
+  done
+}
+
+# Run a docker function in every stack, stopping at the first failure
+function smart-home:utils:each() {
+  local label="$1" fn="$2" stacks stack status
+  shift 2
+  stacks="$(smart-home:utils:list_stacks)" || return
+  for stack in $stacks; do
+    echo "$label $stack..."
+    smart-home:utils:jump "$stack"
+    "$fn" "$@"
+    status=$?
+    smart-home:utils:back
+    [ "$status" -eq 0 ] || return "$status"
+  done
 }
 
 function smart-home:exists() {
@@ -55,34 +84,34 @@ function smart-home:exists() {
 #
 
 function smart-home:docker:compose() {
-  docker compose --env-file .env --env-file "$SMART_HOME_DIR/common.env" $*
+  # Later env files win, so stack .env overrides shared common.env
+  docker compose --env-file "$SMART_HOME_DIR/common.env" --env-file .env "$@"
 }
 
+# --remove-orphans drops containers of services deleted from compose.yml
 function smart-home:docker:up() {
-  smart-home:docker:compose up -d $*
+  smart-home:docker:compose up -d --remove-orphans "$@"
 }
 
 function smart-home:docker:stop() {
-  smart-home:docker:compose stop $*
+  smart-home:docker:compose stop "$@"
 }
 
 function smart-home:docker:down() {
-  smart-home:docker:compose down --remove-orphans $*
+  smart-home:docker:compose down --remove-orphans "$@"
 }
 
 function smart-home:docker:restart() {
-  smart-home:docker:compose restart $* 
+  smart-home:docker:compose restart "$@"
 }
 
 function smart-home:docker:update() {
   echo "Pulling latest images..."
-  smart-home:docker:compose pull $*
+  smart-home:docker:compose pull "$@" || return
   echo "Building images..."
-  smart-home:docker:compose build $*
+  smart-home:docker:compose build "$@" || return
   echo "Starting containers..."
-  smart-home:docker:compose up -d $*
-  echo "Prune to free up space..."
-  docker system prune --volumes -f
+  smart-home:docker:up "$@"
 }
 
 #
@@ -99,96 +128,94 @@ function smart-home:command:help() {
   smart-home [stack] restart            restart all services
   smart-home [stack] update             stop, update and restart all services
   smart-home help                       print this help message
-  smart-home init                       install dependencies
+  smart-home backup                     encrypted snapshot to Telegram (also runs before update)
+  smart-home install-units <unit>...    install systemd units from systemd/ for this checkout
+  smart-home init                       install Docker, Compose and host tools
+  smart-home init-dev                   install docs and pre-commit tooling
   smart-home prune                      delete obsolete containers
   smart-home password                   generate a password
   smart-home docs                       server docs website locally
 "
 }
 
+# Install host dependencies, plus Docker Engine and the Compose plugin from Docker's Debian repository:
+# https://docs.docker.com/engine/install/debian/
 function smart-home:command:init() {
-  # Update packages
-  sudo apt-get update
-  sudo apt-get upgrade
-
-  # Install docker
-  if ! smart-home:exists docker; then
-    echo "Installing docker..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -G docker -a "$USER"
+  if [ "$(. /etc/os-release 2> /dev/null && echo "$ID")" != debian ]; then
+    echo "smart-home init supports Debian only"
+    return 1
   fi
 
-  if ! smart-home:exists docker-compose; then
-    echo "Installing docker-compose..."
-    sudo apt install -y docker-compose
+  sudo apt-get update || return
+  # Host tools used by bin/backup, bin/restore, bin/space-guard and bin/mdns-aliases
+  # (util-linux provides flock and findmnt). Tailscale is installed separately.
+  sudo apt-get install -y ca-certificates curl git age jq util-linux python3-dbus samba || return
+
+  if ! smart-home:exists docker || ! docker compose version > /dev/null 2>&1; then
+    echo "Removing conflicting distro packages..."
+    sudo apt-get remove -y docker.io docker-compose docker-doc podman-docker containerd runc
+
+    echo "Adding Docker apt repository..."
+    sudo install -m 0755 -d /etc/apt/keyrings || return
+    sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc || return
+    sudo chmod a+r /etc/apt/keyrings/docker.asc || return
+    sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null << EOF || return
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+    echo "Installing Docker Engine and Compose plugin..."
+    sudo apt-get update || return
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return
+    sudo usermod -aG docker "$USER" || return
+    echo "Log out and back in for docker group membership to apply."
   fi
 
-  echo "Installing additional packages..."
-  sudo apt-get install -y curl git nodejs
+  docker --version && docker compose version
+}
 
+# Documentation and pre-commit tooling for development machines, not the Pi
+function smart-home:command:init-dev() {
   if ! smart-home:exists uv; then
     echo "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf https://astral.sh/uv/install.sh | sh || return
+    export PATH="$HOME/.local/bin:$PATH"
   fi
 
   echo "Installing Python dependencies..."
-  uv sync
-  
+  uv sync || return
+
   echo "Adding pre-commit hooks..."
   uv run pre-commit install
-
-  echo "Done!"
-  echo "Please, reboot!"
 }
 
 function smart-home:command:up() {
   echo "Starting up all stacks..."
-  for stack in $(smart-home:utils:list_stacks); do
-    echo "Starting up $(basename $stack)..."
-    smart-home:utils:jump "$stack"
-    smart-home:docker:up "$@"
-    smart-home:utils:back
-  done
+  smart-home:utils:each "Starting up" smart-home:docker:up "$@"
 }
 
 function smart-home:command:stop() {
   echo "Stopping all stacks..."
-  for stack in $(smart-home:utils:list_stacks); do
-    echo "Stopping $(basename $stack)..."
-    smart-home:utils:jump "$stack"
-    smart-home:docker:stop "$@"
-    smart-home:utils:back
-  done
+  smart-home:utils:each "Stopping" smart-home:docker:stop "$@"
 }
 
 function smart-home:command:down() {
   echo "Taking down all stacks..."
-  for stack in $(smart-home:utils:list_stacks); do
-    echo "Taking down $(basename $stack)..."
-    smart-home:utils:jump "$stack"
-    smart-home:docker:down "$@"
-    smart-home:utils:back
-  done
+  smart-home:utils:each "Taking down" smart-home:docker:down "$@"
 }
 
 function smart-home:command:update() {
   echo "Updating all stacks..."
-  for stack in $(smart-home:utils:list_stacks); do
-    echo "Updating $(basename $stack)..."
-    smart-home:utils:jump "$stack"
-    smart-home:docker:update "$@"
-    smart-home:utils:back
-  done
+  smart-home:utils:each "Updating" smart-home:docker:update "$@"
 }
 
 function smart-home:command:restart() {
   echo "Restarting all stacks..."
-  for stack in $(smart-home:utils:list_stacks); do
-    echo "Restarting $(basename $stack)..."
-    smart-home:utils:jump "$stack"
-    smart-home:docker:restart "$@"
-    smart-home:utils:back
-  done
+  smart-home:utils:each "Restarting" smart-home:docker:restart "$@"
 }
 
 function smart-home:command:prune() {
@@ -196,29 +223,57 @@ function smart-home:command:prune() {
   sudo apt-get clean
   sudo apt-get autoremove --purge
   
-  echo "Clearing system logs..."
-  sudo truncate -s 0 /var/log/*.log
+  echo "Vacuuming journal logs..."
   sudo journalctl --disk-usage
   sudo journalctl --vacuum-size=500M
-
-  echo "Clearing tmp files..."
-  sudo rm -rf /tmp/*
-  sudo rm -rf /var/tmp/*
 
   echo "Pruning unused docker objects..."
   docker system prune -af --volumes
 }
 
+# Run bin/backup through its systemd unit, so it runs as root with the unit's settings
+function smart-home:command:backup() {
+  sudo systemctl start smart-home-backup.service
+}
+
+# Copy systemd/<unit> to /etc/systemd/system, filling in this checkout's path
+# and the UUID of the disk now mounted at /srv/media, then reload systemd
+function smart-home:command:install-units() {
+  local unit uuid=""
+  if [ "$#" -eq 0 ]; then
+    echo "Usage: smart-home install-units <unit>..."
+    return 1
+  fi
+  for unit in "$@"; do
+    unit="$(basename "$unit")"
+    if [ ! -f "$SMART_HOME_DIR/systemd/$unit" ]; then
+      echo "No such unit: systemd/$unit"
+      return 1
+    fi
+    if [ -z "$uuid" ] && grep -q @MEDIA_UUID@ "$SMART_HOME_DIR/systemd/$unit"; then
+      uuid="$(findmnt -n -o UUID --mountpoint /srv/media)"
+      if [ -z "$uuid" ]; then
+        echo "No disk mounted at /srv/media; mount the media disk first"
+        return 1
+      fi
+    fi
+    sed -e "s|@SMART_HOME_DIR@|$SMART_HOME_DIR|g" -e "s|@MEDIA_UUID@|$uuid|g" "$SMART_HOME_DIR/systemd/$unit" \
+      | sudo tee "/etc/systemd/system/$unit" > /dev/null || return
+  done
+  sudo systemctl daemon-reload
+}
+
 function smart-home:command:password() {
   local password length
   length=${1:-16}
-  password="$(openssl rand -base64 $length | rev | cut -b 2- | rev)";
+  password="$(openssl rand -base64 "$length" | rev | cut -b 2- | rev)";
 
   echo "$password"
 }
 
 function smart-home:command:docs() {
-  local ip="$(hostname -I | awk '{print $1}')"
+  local ip
+  ip="$(hostname -I | awk '{print $1}')"
   uv run mkdocs serve --livereload --dev-addr "$ip:7000"
 }
 
@@ -232,25 +287,36 @@ function main() {
     return 1;
   fi;
 
+  if [ -z "$STACK" ] && [ -z "$COMMAND" ]; then
+    smart-home:command:help
+    return 0
+  fi
+
   if ! smart-home:utils:validate; then
     smart-home:command:help
     return 1
   fi
 
-  smart-home:utils:jump "$SMART_HOME_DIR"
+  # Snapshot application state before changing images, once backups are set up
+  if [ "$COMMAND" = update ] && [ -f "$SMART_HOME_DIR/backup.env" ]; then
+    if ! smart-home:command:backup; then
+      echo "Backup failed; not updating"
+      return 1
+    fi
+  fi
+
+  local status=0
+  smart-home:utils:jump "${STACK_DIR:-$SMART_HOME_DIR}"
 
   # Run command in the $STACK context
   if [ -n "$STACK" ]; then
-    smart-home:utils:jump "$STACK_DIR"
-    smart-home:docker:"$COMMAND" "${COMMAND_ARGS[*]}"
-    smart-home:utils:back
-    return $?
+    smart-home:docker:"$COMMAND" "${COMMAND_ARGS[@]}" || status=$?
+  else
+    smart-home:command:"$COMMAND" "${COMMAND_ARGS[@]}" || status=$?
   fi
 
-  smart-home:command:"$COMMAND" "${COMMAND_ARGS[*]}"
   smart-home:utils:back
-
-  return $?
+  return "$status"
 }
 
 main

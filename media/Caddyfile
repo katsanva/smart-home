@@ -1,0 +1,109 @@
+# LAN names for the web UIs. Each site answers on two names:
+# - https://<name>.HOME_DOMAIN (media/.env), with a Let's Encrypt certificate
+#   from a Cloudflare DNS challenge. DNS points HOME_DOMAIN and *.HOME_DOMAIN to
+#   the Pi's LAN IP, so the names work only on the home network. Without
+#   HOME_DOMAIN they fall back to *.localhost with Caddy's local certificates.
+# - http://<name>.local, published over mDNS by bin/mdns-aliases; it redirects
+#   to the HTTPS name, which carries the login cookie.
+# Gated sites ask tinyauth first, which signs in through Pocket ID; the apps'
+# own logins are off, so their ports stay on 127.0.0.1 (media/compose.yml).
+# After editing: smart-home media restart caddy (the file is mounted by inode).
+{
+	admin off
+	# "acme_dns cloudflare <token>" when CLOUDFLARE_API_TOKEN is set (media/compose.yml)
+	{$CADDY_ACME_DNS}
+}
+
+# http://<name>.local moves to https://<name>.HOME_DOMAIN
+(https) {
+	@local host {args[0]}.local
+	redir @local https://{args[0]}.{$HOME_DOMAIN}{uri}
+}
+
+# Pocket ID login (through tinyauth) in front of {args[1]}
+(gated) {
+	import https {args[0]}
+	handle {
+		forward_auth tinyauth:3000 {
+			uri /api/auth/caddy
+		}
+		reverse_proxy {args[1]}
+	}
+}
+
+id.{$HOME_DOMAIN} {
+	reverse_proxy pocket-id:1411
+}
+
+auth.{$HOME_DOMAIN} {
+	reverse_proxy tinyauth:3000
+}
+
+http://home.local, {$HOME_DOMAIN} {
+	@local host home.local
+	redir @local https://{$HOME_DOMAIN}{uri}
+	handle {
+		forward_auth tinyauth:3000 {
+			uri /api/auth/caddy
+		}
+		reverse_proxy homepage:3000
+	}
+}
+
+# Seerr and Plex sign in with Plex accounts
+http://seerr.local, seerr.{$HOME_DOMAIN} {
+	import https seerr
+	reverse_proxy seerr:5055
+}
+
+http://plex.local, plex.{$HOME_DOMAIN} {
+	import https plex
+	reverse_proxy host.docker.internal:32400
+}
+
+http://qbittorrent.local, qbittorrent.{$HOME_DOMAIN} {
+	import gated qbittorrent qbittorrent:8080
+}
+
+# Radarr, Sonarr and Prowlarr check the API key of API clients themselves
+http://radarr.local, radarr.{$HOME_DOMAIN} {
+	@api path /api/*
+	handle @api {
+		reverse_proxy radarr:7878
+	}
+	import gated radarr radarr:7878
+}
+
+http://sonarr.local, sonarr.{$HOME_DOMAIN} {
+	@api path /api/*
+	handle @api {
+		reverse_proxy sonarr:8989
+	}
+	import gated sonarr sonarr:8989
+}
+
+# Torznab clients (Lampa) use /<indexer>/api and /<indexer>/download with the key
+http://prowlarr.local, prowlarr.{$HOME_DOMAIN} {
+	@api path /api/* /*/api /*/download
+	handle @api {
+		reverse_proxy prowlarr:9696
+	}
+	import gated prowlarr prowlarr:9696
+}
+
+http://bazarr.local, bazarr.{$HOME_DOMAIN} {
+	import gated bazarr bazarr:6767
+}
+
+http://cleanuparr.local, cleanuparr.{$HOME_DOMAIN} {
+	import gated cleanuparr cleanuparr:11011
+}
+
+# Players cannot sign in: stream links stay open, like the LAN port 8090
+http://torrserver.local, torrserver.{$HOME_DOMAIN} {
+	@media path /stream* /play* /playlist*
+	handle @media {
+		reverse_proxy torrserver:8090
+	}
+	import gated torrserver torrserver:8090
+}

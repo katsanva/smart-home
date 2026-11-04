@@ -1,0 +1,15 @@
+# Encrypted application-state snapshot to Telegram (bin/backup). Started daily
+# by smart-home-backup.timer and by `smart-home backup` / `smart-home update`.
+# bin/backup sends its own failure alerts, including when interrupted.
+
+[Unit]
+Description=Smart Home encrypted backup to Telegram
+Wants=network-online.target
+# After media startup, so a catch-up run at boot never archives services mid-start
+After=network-online.target docker.service srv-media.mount smart-home-media.service
+
+[Service]
+Type=oneshot
+Environment=SMART_HOME_DIR=@SMART_HOME_DIR@
+ExecStart=@SMART_HOME_DIR@/bin/backup
+TimeoutStartSec=2h

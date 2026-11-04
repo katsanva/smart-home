@@ -30,13 +30,11 @@ You can read more about it in a [section about Ad-Blocking](../ad-blocking).
 
 Basically, this is a self-hosted Netflix. Plex helps me expose and manage media files from the [hard drive wired to Raspberry Pi](../../hardware#media-volume). It finds localized metadata for my media: descriptions, reviews, posters, and soundtracks.
 
-Media is downloaded via [Transmission](#transmission).
+Media is downloaded via [qBittorrent](#qbittorrent).
 
-## Transmission
+## qBittorrent
 
-![Transmission](https://user-images.githubusercontent.com/3459374/115125563-ac24b480-9fd1-11eb-84f6-0767b70ee4a0.png)
-
-[Transmission](https://transmissionbt.com/) is a popular BitTorrent client. It can be hosted as a Docker container — that's exactly what I did.
+[qBittorrent](https://www.qbittorrent.org/) is a BitTorrent client with a web UI, hosted as a Docker container.
 
 I use it for downloading media to [my hard drive](../../hardware#media-volume).
 
