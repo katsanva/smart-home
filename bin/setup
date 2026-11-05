@@ -168,6 +168,11 @@ function samba() {
   sudo systemctl restart smbd
 }
 
+function journal() {
+  sudo install -D -m 644 systemd/journald.conf.in /etc/systemd/journald.conf.d/smart-home.conf || return 1
+  sudo systemctl restart systemd-journald
+}
+
 function main() {
   env_files || die "could not create the env files"
   # Only the mounted media disk, never the SD card
@@ -188,6 +193,7 @@ function main() {
   backups || die "could not enable backups"
   mdns || die "could not publish the .local names"
   samba || die "could not set up the inbox share"
+  journal || die "could not set up the journal"
 }
 
 main
