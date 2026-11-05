@@ -282,6 +282,12 @@ services:
       ZERODAY_USERNAME: ${ZERODAY_USERNAME:-}
       ZERODAY_PASSWORD: ${ZERODAY_PASSWORD:-}
       ELECTRIC_URL: ''
+      # Renames UTP and Toloka torrents to their release names (with audio
+      # languages) so imports keep the Ukrainian score. It only picks up torrents
+      # added stopped: Radarr/Sonarr send those indexers to the "qBittorrent (rename)"
+      # download client. No login needed: qBittorrent trusts the Docker network.
+      QBITTORRENT_URL: http://qbittorrent:8080
+      QBITTORRENT_CATEGORIES: radarr,tv-sonarr
     volumes:
       - type: bind
         source: ${DOCKER}/ukr-torznab
