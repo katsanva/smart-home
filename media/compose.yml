@@ -105,6 +105,12 @@ services:
       gluetun:
         condition: service_healthy
         restart: true
+    # It idles around 200 MB but has spiked to 5 GB, and the kernel's OOM killer
+    # then stalls the whole Pi. The cap kills only qBittorrent, which restarts.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
   # Gluetun
   # ProtonVPN tunnel for qBittorrent. The ISP gives no public IPv4 port (DS-Lite),
