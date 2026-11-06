@@ -309,8 +309,8 @@ services:
   ukr-torznab:
     profiles: [ukr-torznab]
     container_name: ukr-torznab
-    build: https://github.com/katsanva/ukr-torznab.git#58a9e422265996412ad492ca137c44e33a13f462
-    image: ukr-torznab:58a9e42
+    build: https://github.com/katsanva/ukr-torznab.git#5372b78eda482dd51e1594330c0d3f3e77f15418
+    image: ukr-torznab:5372b78
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
     mem_limit: 512m
     logging: *logging
