@@ -13,6 +13,7 @@
 #   (media/smb.conf.in) when LAN_BIND_ADDRESS is set.
 # - Enables the space guard; enables backups when backup.env exists or
 #   BACKUP_RECIPIENT, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are given.
+# - Turns on memory cgroups so the services' memory limits apply (needs a reboot).
 #
 # Usage: SMART_HOME_DIR=... bin/setup
 # Optional env: MEDIA_VOLUME (default /srv/media), PLEX_CLAIM, BACKUP_RECIPIENT,
@@ -173,6 +174,16 @@ function journal() {
   sudo systemctl restart systemd-journald
 }
 
+# Raspberry Pi kernels boot with memory cgroups off, so Docker ignores the
+# mem_limit of every service until this flag is set and the Pi rebooted
+function memory_cgroups() {
+  local cmdline=/boot/firmware/cmdline.txt
+  [ -e "$cmdline" ] || return 0
+  grep -qw cgroup_enable=memory "$cmdline" && return 0
+  sudo sed -i '1 s/$/ cgroup_enable=memory/' "$cmdline" || return 1
+  echo "Enabled memory limits: reboot for them to take effect (sudo reboot)"
+}
+
 function main() {
   env_files || die "could not create the env files"
   # Only the mounted media disk, never the SD card
@@ -194,6 +205,7 @@ function main() {
   mdns || die "could not publish the .local names"
   samba || die "could not set up the inbox share"
   journal || die "could not set up the journal"
+  memory_cgroups || die "could not enable memory limits"
 }
 
 main

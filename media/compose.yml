@@ -18,6 +18,11 @@ x-logging: &logging
     max-size: 10m
     max-file: '3'
 
+# Every service has a mem_limit well above its normal use. A runaway container
+# (qBittorrent has spiked to 5 GB) is then killed and restarted on its own,
+# instead of the kernel's OOM killer stalling the whole Pi. Needs memory cgroups,
+# which bin/setup enables in the boot command line.
+
 # Initial services pin version tag + multi-arch index digest (verified to include
 # linux/arm64). Update by changing both deliberately; never rely on :latest.
 services:
@@ -27,6 +32,7 @@ services:
     container_name: plex
     image: lscr.io/linuxserver/plex:1.43.5.11079-b3b13e506-ls330@sha256:01a53d9c7adcbb3701fbb0a4230c0a37c85453759b6b05a67356c3c7a09de08d
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 2g
     logging: *logging
     network_mode: host
     environment:
@@ -82,6 +88,7 @@ services:
     container_name: qbittorrent
     image: lscr.io/linuxserver/qbittorrent:5.3.0_v2.1.2-ls485@sha256:75ecbb1c89ab7b0a21c4bde40b4820e4f1649d2d56d83b91913422155e8d2a5f
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 2g
     logging: *logging
     environment:
       <<: *environment
@@ -105,12 +112,6 @@ services:
       gluetun:
         condition: service_healthy
         restart: true
-    # It idles around 200 MB but has spiked to 5 GB, and the kernel's OOM killer
-    # then stalls the whole Pi. The cap kills only qBittorrent, which restarts.
-    deploy:
-      resources:
-        limits:
-          memory: 2G
 
   # Gluetun
   # ProtonVPN tunnel for qBittorrent. The ISP gives no public IPv4 port (DS-Lite),
@@ -120,6 +121,7 @@ services:
     container_name: gluetun
     image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
     logging: *logging
     cap_add:
       - NET_ADMIN
@@ -160,6 +162,7 @@ services:
     image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
     init: true
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
     logging: *logging
     environment: *environment
     volumes:
@@ -185,6 +188,7 @@ services:
     image: lscr.io/linuxserver/radarr:6.4.4.10685-ls324@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: radarr
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
     logging: *logging
     environment: *environment
     volumes:
@@ -211,6 +215,7 @@ services:
     container_name: sonarr
     image: lscr.io/linuxserver/sonarr:4.0.20.3014-ls1@sha256:48e36b608b461273b9dae857725cd0561a127f2c694b687318f6d0c5ce63e5c9
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
     logging: *logging
     environment: *environment
     volumes:
@@ -237,6 +242,7 @@ services:
     container_name: prowlarr
     image: lscr.io/linuxserver/prowlarr:2.7.0.5723-ls166@sha256:04be30163fbaf48d6aeee7b5893c9f6614ffbad6d853971df0d6dcdf01c7f104
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
     logging: *logging
     environment: *environment
     volumes:
@@ -255,6 +261,7 @@ services:
     container_name: flaresolverr
     image: ghcr.io/flaresolverr/flaresolverr:v3.5.2@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
     logging: *logging
     environment:
       TZ: ${TZ:?TZ must be set}
@@ -279,6 +286,7 @@ services:
     build: https://github.com/katsanva/ukr-torznab.git#b20cbe06b3dd4350ba61bc1dab03075d11259629
     image: ukr-torznab:b20cbe0
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment:
       TZ: ${TZ:?TZ must be set}
@@ -309,6 +317,7 @@ services:
     container_name: caddy
     image: ghcr.io/caddybuilds/caddy-cloudflare:2.11.7@sha256:9c398a17f826530b99e0a68e63ba85f341ddbadc9c2f23668a1aa8f58ce33fb8
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
     logging: *logging
     environment:
       HOME_DOMAIN: ${HOME_DOMAIN:-localhost}
@@ -337,6 +346,7 @@ services:
     container_name: pocket-id
     image: ghcr.io/pocket-id/pocket-id:v2.19.1@sha256:f085157f0b6ea4b2e8aa5ecfd99eada0d83a4960f3a3dcfd46014097d0ef7ab5
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
     logging: *logging
     environment:
       <<: *environment
@@ -357,6 +367,7 @@ services:
     container_name: tinyauth
     image: ghcr.io/tinyauthapp/tinyauth:v5.2.0@sha256:220aa235c76393a73fece831d7ba967b8698d3907fd8e3c4c952f699c7b142a5
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 128m
     logging: *logging
     environment:
       TZ: ${TZ:?TZ must be set}
@@ -384,6 +395,7 @@ services:
     container_name: homepage
     image: ghcr.io/gethomepage/homepage:v2.7.0@sha256:19c5c09184458a41b7b5915e71463a39f36cd33540f41bdbed008791b8182d5f
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
     logging: *logging
     environment:
       <<: *environment
@@ -433,6 +445,7 @@ services:
     container_name: torrserver
     image: ghcr.io/yourok/torrserver:MatriX.148@sha256:08461086e30832e1497c2ff1d57ea723d8f18b3ad6f0f0d0f956bfe58c3e85ba
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1536m
     logging: *logging
     environment:
       TZ: ${TZ:?TZ must be set}
@@ -453,6 +466,7 @@ services:
     container_name: bazarr
     image: lscr.io/linuxserver/bazarr:v1.6.2-ls370@sha256:9a625883f054e722795affe5e3ca71057e6ed817ecdf99f4a99624346fcc509c
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -482,6 +496,7 @@ services:
     container_name: trailarr
     image: nandyalu/trailarr:latest
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -506,6 +521,7 @@ services:
     container_name: maintainerr
     image: ghcr.io/maintainerr/maintainerr:latest
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -526,6 +542,7 @@ services:
     container_name: agregarr
     image: bitr8/agregarr:develop
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -546,6 +563,7 @@ services:
     image: ghcr.io/cleanuparr/cleanuparr:latest
     container_name: cleanuparr
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -570,6 +588,7 @@ services:
     container_name: tautulli
     image: ghcr.io/tautulli/tautulli
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
@@ -590,6 +609,7 @@ services:
     container_name: audiobookshelf
     image: ghcr.io/advplyr/audiobookshelf:latest
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
     logging: *logging
     environment: *environment
     volumes:
