@@ -114,9 +114,12 @@ services:
         restart: true
 
   # Gluetun
-  # ProtonVPN tunnel for qBittorrent. The ISP gives no public IPv4 port (DS-Lite),
-  # so peers connect in through ProtonVPN's forwarded port, which gluetun sets as
-  # qBittorrent's listening port. Without the VPN qBittorrent has no network.
+  # ProtonVPN tunnel for qBittorrent and everything that talks to trackers
+  # (Prowlarr, FlareSolverr, ukr-torznab): they share its network. The ISP gives
+  # no public IPv4 port (DS-Lite), so peers connect in through ProtonVPN's
+  # forwarded port, which gluetun sets as qBittorrent's listening port. Its
+  # firewall is the kill switch: without the VPN these services reach only the
+  # Docker network, never the internet.
   gluetun:
     container_name: gluetun
     image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
@@ -132,7 +135,11 @@ services:
       VPN_SERVICE_PROVIDER: protonvpn
       VPN_TYPE: wireguard
       WIREGUARD_PRIVATE_KEY: ${PROTONVPN_WIREGUARD_PRIVATE_KEY:-}
-      SERVER_COUNTRIES: ${PROTONVPN_SERVER_COUNTRIES:-Netherlands}
+      # Gluetun picks a random port-forwarding server among these, so the list
+      # stays in Europe, close to the Ukrainian trackers' peers
+      SERVER_COUNTRIES: ${PROTONVPN_SERVER_COUNTRIES:-Switzerland,Spain,Czech Republic,Ukraine,Romania,Bulgaria,Latvia}
+      # The control server's default :8000 is ukr-torznab's port in this network
+      HTTP_CONTROL_SERVER_ADDRESS: 127.0.0.1:8001
       PORT_FORWARD_ONLY: 'on'
       VPN_PORT_FORWARDING: 'on'
       # Needs qBittorrent's "bypass authentication for clients on localhost" (bin/setup)
@@ -149,11 +156,16 @@ services:
         http://127.0.0.1:8080/api/v2/app/setPreferences'
     networks:
       default:
-        # Other services keep reaching the WebUI at qbittorrent:8080
+        # Other services keep reaching the services in this network by name
         aliases:
           - qbittorrent
+          - prowlarr
+          - flaresolverr
+          - ukr-torznab
     ports:
       - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8080:8080
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:9696:9696
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8191:8191
 
   # Overseerr
   # Nice app for requesting new content
@@ -251,8 +263,12 @@ services:
         target: /config
         bind:
           create_host_path: false
-    ports:
-      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:9696:9696
+    # Searches and .torrent downloads go through the VPN; port published on gluetun
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
 
   # FlareSolverr
   # Headless browser that solves Cloudflare challenges for Prowlarr indexers
@@ -266,8 +282,11 @@ services:
     environment:
       TZ: ${TZ:?TZ must be set}
       LOG_LEVEL: info
-    ports:
-      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8191:8191
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
 
   # ukr-torznab
   # Torznab indexer for Toloka, UTOPIA and 0day with scene-style release names
@@ -302,6 +321,11 @@ services:
       # download client. No login needed: qBittorrent trusts the Docker network.
       QBITTORRENT_URL: http://qbittorrent:8080
       QBITTORRENT_CATEGORIES: radarr,tv-sonarr
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
     volumes:
       - type: bind
         source: ${DOCKER}/ukr-torznab
