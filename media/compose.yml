@@ -139,7 +139,9 @@ services:
       # stays in Europe, close to the Ukrainian trackers' peers
       SERVER_COUNTRIES: ${PROTONVPN_SERVER_COUNTRIES:-Switzerland,Spain,Czech Republic,Ukraine,Romania,Bulgaria,Latvia}
       # The control server's default :8000 is ukr-torznab's port in this network
-      HTTP_CONTROL_SERVER_ADDRESS: 127.0.0.1:8001
+      HTTP_CONTROL_SERVER_ADDRESS: :8001
+      HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /auth.toml
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?GLUETUN_API_KEY must be set (bin/setup generates it)}"}'
       PORT_FORWARD_ONLY: 'on'
       VPN_PORT_FORWARDING: 'on'
       # Needs qBittorrent's "bypass authentication for clients on localhost" (bin/setup)
@@ -154,6 +156,11 @@ services:
         /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
         "json={\"listen_port\":0,\"current_network_interface\":\"tun0\"}"
         http://127.0.0.1:8080/api/v2/app/setPreferences'
+    volumes:
+      - type: bind
+        source: ./gluetun/auth.toml
+        target: /auth.toml
+        read_only: true
     networks:
       default:
         # Other services keep reaching the services in this network by name

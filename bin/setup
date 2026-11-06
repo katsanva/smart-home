@@ -76,6 +76,7 @@ function env_files() {
   fi
   [ -z "${PLEX_CLAIM:-}" ] || fill_value media/.env PLEX_CLAIM "$PLEX_CLAIM"
   fill_value media/.env POCKET_ID_ENCRYPTION_KEY "$(openssl rand -hex 32)"
+  fill_value media/.env GLUETUN_API_KEY "$(openssl rand -hex 32)"
 }
 
 # Bind mounts in media/compose.yml never create host paths, so create them here
