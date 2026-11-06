@@ -78,7 +78,9 @@ function connect_prowlarr() {
     | jq -e --arg app "$app" 'any(.[]; .implementation == $app)' > /dev/null; then
     api http://127.0.0.1:9696 "$key" GET api/v1/applications/schema \
       | APP="$app" APP_URL="$app_url" APP_KEY="$4" jq '
-        {prowlarrUrl: "http://prowlarr:9696", baseUrl: env.APP_URL, apiKey: env.APP_KEY} as $set
+        # Blocklisted hashes (Cleanuparr) are not grabbed again from another indexer
+        {prowlarrUrl: "http://prowlarr:9696", baseUrl: env.APP_URL, apiKey: env.APP_KEY,
+          syncRejectBlocklistedTorrentHashesWhileGrabbing: true} as $set
         | first(.[] | select(.implementation == env.APP))
         | .name = env.APP | .syncLevel = "fullSync"
         | .fields |= map(. as $f | .value = ($set[$f.name] // $f.value))' \
