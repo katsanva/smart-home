@@ -61,6 +61,12 @@ http://plex.local, plex.{$HOME_DOMAIN} {
 	reverse_proxy host.docker.internal:32400
 }
 
+# Home Assistant has its own login; forward_auth would break its mobile app
+http://assistant.local, assistant.{$HOME_DOMAIN} {
+	import https assistant
+	reverse_proxy host.docker.internal:8123
+}
+
 http://qbittorrent.local, qbittorrent.{$HOME_DOMAIN} {
 	import gated qbittorrent qbittorrent:8080
 }

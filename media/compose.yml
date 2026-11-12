@@ -82,6 +82,41 @@ services:
           create_host_path: false
     shm_size: 1gb
 
+  # Home Assistant
+  # Home automation. Host network for device discovery (mDNS, SSDP). It listens
+  # only on 127.0.0.1 and the Docker bridge (Settings > System > Network), so
+  # the LAN and the tailnet reach it through Caddy alone, at https://assistant.HOME_DOMAIN
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:2026.11.0@sha256:c6c1ca9931036bf3a2c4cc088d8db25dfea3b33935a5ecc83c40349462e2f69e
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    network_mode: host
+    # Bluetooth adapter: management socket here, BlueZ through /run/dbus below
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # By default home-assistant.log only rolls over at startup, with no size limit
+    entrypoint:
+      - sh
+      - -c
+      - sed -i 's|--config /config$$|--config /config --log-rotate-days 7|' /etc/services.d/home-assistant/run && exec /init
+    environment:
+      TZ: ${TZ:?TZ must be set}
+    volumes:
+      - type: bind
+        source: ${DOCKER}/homeassistant
+        target: /config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /run/dbus
+        target: /run/dbus
+        read_only: true
+        bind:
+          create_host_path: false
+
   # qBittorrent
   # A feature-rich torrent client for downloading media, with a nice web UI
   qbittorrent:
@@ -368,7 +403,7 @@ services:
       - ${LAN_BIND_ADDRESS:-127.0.0.2}:80:80
       - ${LAN_BIND_ADDRESS:-127.0.0.2}:443:443
     extra_hosts:
-      - host.docker.internal:host-gateway # reach host-networked Plex
+      - host.docker.internal:host-gateway # reach host-networked Plex and Home Assistant
 
   # Pocket ID
   # Passkey sign-in (OIDC provider) at https://id.HOME_DOMAIN. Admin and users

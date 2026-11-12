@@ -85,7 +85,7 @@ function directories() {
   for d in movies tv music transcode downloads downloads/incomplete downloads/complete inbox inbox/movies inbox/tv \
     appdata appdata/plex appdata/qbittorrent appdata/seerr appdata/radarr appdata/sonarr \
     appdata/prowlarr appdata/bazarr appdata/trailarr appdata/maintainerr appdata/agregarr \
-    appdata/caddy appdata/pocket-id appdata/tinyauth appdata/cleanuparr appdata/tautulli appdata/torrserver appdata/ukr-torznab appdata/audiobookshelf \
+    appdata/caddy appdata/pocket-id appdata/tinyauth appdata/cleanuparr appdata/tautulli appdata/torrserver appdata/ukr-torznab appdata/homeassistant appdata/audiobookshelf \
     appdata/audiobookshelf/config appdata/audiobookshelf/metadata; do
     [ -d "$MEDIA/$d" ] || sudo install -d -o "$(id -u)" -g "$(id -g)" "$MEDIA/$d" || return 1
   done

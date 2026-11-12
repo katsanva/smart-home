@@ -20,6 +20,11 @@
         icon: torrserver.png
         href: https://torrserver.{{HOMEPAGE_VAR_HOME_DOMAIN}}
 
+- Home:
+    - Home Assistant:
+        icon: home-assistant.png
+        href: https://assistant.{{HOMEPAGE_VAR_HOME_DOMAIN}}
+
 - Downloads:
     - Radarr:
         icon: radarr.png
