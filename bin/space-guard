@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Pause new downloads while the media disk is nearly full.
+#
+# Below SPACE_GUARD_MIN_FREE percent free (default 10): disable the enabled
+# Sonarr/Radarr download clients, so no new releases are grabbed, stop
+# downloading torrents in qBittorrent, and send one loud Telegram alert.
+# Seeding torrents and library files are left alone; nothing is deleted.
+# At SPACE_GUARD_RESUME_FREE percent free or more (default 12), re-enable and
+# restart exactly what was paused and send a silent note.
+#
+# Usage: SMART_HOME_DIR=... bin/space-guard (run every few minutes by systemd)
+
+set -o pipefail
+
+: "${SMART_HOME_DIR:?SMART_HOME_DIR is unset}"
+
+# Value of KEY from media/.env, falling back to common.env. A quoted value is
+# taken verbatim between its quotes (so passwords may contain " #"); an
+# unquoted one ends at a " #" comment.
+function setting() {
+  local file raw value=""
+  for file in "$SMART_HOME_DIR/media/.env" "$SMART_HOME_DIR/common.env"; do
+    raw="$(sed -n "s/^$1=//p" "$file" 2> /dev/null | tail -n 1)"
+    case "$raw" in
+      \"*) value="${raw#\"}" value="${value%%\"*}" ;;
+      \'*) value="${raw#\'}" value="${value%%\'*}" ;;
+      *) value="$(sed 's/[[:space:]]#.*//; s/[[:space:]]*$//' <<< "$raw")" ;;
+    esac
+    [ -n "$value" ] && break
+  done
+  echo "${value:-$2}"
+}
+
+MEDIA_VOLUME="$(setting MEDIA_VOLUME)"
+: "${MEDIA_VOLUME:?MEDIA_VOLUME is unset}"
+MIN_FREE="$(setting SPACE_GUARD_MIN_FREE 10)"
+RESUME_FREE="$(setting SPACE_GUARD_RESUME_FREE 12)"
+QBT_URL="$(setting QBITTORRENT_URL http://127.0.0.1:8080)"
+DOCKER="$(setting DOCKER)"
+: "${DOCKER:?DOCKER is unset}"
+# Inside appdata, so backups keep the records needed to undo a pause
+STATE="$DOCKER/.space-guard"
+COOKIES=""
+
+function free_percent() {
+  df -Pk "$MEDIA_VOLUME" | awk 'NR == 2 { printf "%d", $4 * 100 / $2 }'
+}
+
+# Queue a message ("alert" loud or "notify" silent) and deliver the queue.
+# Undelivered messages stay queued and are retried on the next run.
+function message() {
+  printf '%s\t%s\n' "$1" "$2" >> "$STATE/outbox" || return 1
+  deliver
+}
+
+function deliver() {
+  local kind text remaining=()
+  [ -s "$STATE/outbox" ] || return 0
+  while IFS=$'\t' read -r kind text; do
+    if [ "${#remaining[@]}" -gt 0 ] || ! "$SMART_HOME_DIR/bin/backup" "$kind" "$text" > /dev/null; then
+      remaining+=("$kind"$'\t'"$text") # keep order: stop at the first failure
+    fi
+  done < "$STATE/outbox"
+  if [ "${#remaining[@]}" -eq 0 ]; then
+    rm -f "$STATE/outbox"
+  else
+    printf '%s\n' "${remaining[@]}" > "$STATE/outbox"
+  fi
+}
+
+# Loud alert for a guard error, once per distinct error
+function error() {
+  [ "$(cat "$STATE/last-error" 2> /dev/null)" = "$1" ] && return 1
+  printf '%s' "$1" > "$STATE/last-error"
+  message alert "Media space guard: $1"
+  return 1
+}
+
+function qbt() {
+  local path="$1"
+  shift
+  curl -sS --fail --max-time 30 --cookie "$COOKIES" --cookie-jar "$COOKIES" \
+    --header "Referer: $QBT_URL" "$@" "$QBT_URL/api/v2/$path"
+}
+
+function qbt_login() {
+  local body
+  [ -n "$COOKIES" ] && return 0
+  COOKIES="$(mktemp)" || return 1
+  # Password via stdin, so it never appears in process arguments
+  body="$(printf '%s' "$(setting QBITTORRENT_PASSWORD)" \
+    | qbt auth/login --data-urlencode "username=$(setting QBITTORRENT_USER)" --data-urlencode "password@-")" || return 1
+  # qBittorrent 5 answers 204 with no body, older versions "Ok."; failures "Fails."
+  [ -z "$body" ] || [ "$body" = "Ok." ]
+}
+
+# Sonarr/Radarr API: arr <app> <method> <path> [body]
+function arr() {
+  local app="$1" method="$2" path="$3" url key upper data=()
+  upper="$(echo "$app" | tr '[:lower:]' '[:upper:]')"
+  case "$app" in sonarr) url="http://127.0.0.1:8989" ;; radarr) url="http://127.0.0.1:7878" ;; esac
+  url="$(setting "${upper}_URL" "$url")"
+  key="$(setting "${upper}_API_KEY")"
+  [ -n "$4" ] && data=(--data "$4")
+  curl -sS --fail --max-time 30 -X "$method" --config <(printf 'header = "X-Api-Key: %s"\n' "$key") \
+    -H 'Content-Type: application/json' "${data[@]}" "$url/api/v3/$path"
+}
+
+function set_client() {
+  local app="$1" id="$2" enable="$3" client
+  client="$(arr "$app" GET "downloadclient/$id")" || return 1
+  arr "$app" PUT "downloadclient/$id" "$(jq -c ".enable = $enable" <<< "$client")" > /dev/null
+}
+
+# Records are appended, never truncated: after a partial failure the next run
+# continues and still remembers what it already paused.
+function pause_downloads() {
+  local app id ids hashes failed=0
+
+  # Block grabs first, so nothing new arrives while downloads are stopped.
+  # An unreachable app must not keep torrents running, so carry on and fail at the end.
+  for app in sonarr radarr; do
+    [ -n "$(setting "$(echo "$app" | tr '[:lower:]' '[:upper:]')_API_KEY")" ] || continue
+    ids="$(arr "$app" GET downloadclient | jq -r '.[] | select(.enable) | .id')" || {
+      failed=1
+      continue
+    }
+    for id in $ids; do
+      echo "$app $id" >> "$STATE/clients" || return 1 # record first, so a failed call is still undone
+      set_client "$app" "$id" false || failed=1
+    done
+  done
+
+  qbt_login || return 1
+  # The downloading filter also lists stopped downloads; leave those alone
+  hashes="$(qbt 'torrents/info?filter=downloading' \
+    | jq -r '.[] | select(.state != "stoppedDL" and .state != "pausedDL") | .hash')" || return 1
+  if [ -n "$hashes" ]; then
+    echo "$hashes" >> "$STATE/torrents" || return 1
+    qbt torrents/stop --data "hashes=$(echo "$hashes" | paste -sd '|' -)" > /dev/null || return 1
+  fi
+  return "$failed"
+}
+
+function resume_downloads() {
+  local app id hashes
+  while read -r app id; do
+    set_client "$app" "$id" true || return 1
+  done < <(sort -u "$STATE/clients" 2> /dev/null)
+
+  hashes="$(sort -u "$STATE/torrents" 2> /dev/null | paste -sd '|' -)"
+  if [ -n "$hashes" ]; then
+    qbt_login && qbt torrents/start --data "hashes=$hashes" > /dev/null || return 1
+  fi
+}
+
+function main() {
+  local free
+
+  # Only act on the real media disk; never create state on the SD card
+  findmnt --mountpoint "$MEDIA_VOLUME" > /dev/null && [ -d "$DOCKER" ] || return 0
+  mkdir -p "$STATE" || return 1
+  deliver
+  free="$(free_percent)" || return 1
+
+  # "low": guard engaged (possibly partially paused); "paused": pause completed
+  if [ ! -e "$STATE/paused" ] && [ "$free" -lt "$MIN_FREE" ]; then
+    touch "$STATE/low" || return 1
+    pause_downloads || {
+      error "could not pause downloads at ${free}% free, check the logs"
+      return 1
+    }
+    touch "$STATE/paused"
+    rm -f "$STATE/last-error"
+    message alert "Media disk ${free}% free (below ${MIN_FREE}%): new grabs and downloads paused, nothing deleted. Free space to resume."
+  elif [ -e "$STATE/low" ] && [ "$free" -ge "$RESUME_FREE" ]; then
+    resume_downloads || {
+      error "could not resume downloads at ${free}% free, check the logs"
+      return 1
+    }
+    rm -f "$STATE/low" "$STATE/paused" "$STATE/clients" "$STATE/torrents" "$STATE/last-error"
+    message notify "Media disk ${free}% free: grabs and downloads resumed."
+  fi
+}
+
+main
+status=$?
+[ -n "$COOKIES" ] && rm -f "$COOKIES"
+exit "$status"

@@ -8,6 +8,10 @@ You can read more about my hardware (WiFi, ESPHome and Zigbee devices) on my Hom
 
 ## Homelab Server
 
+<!-- prettier-ignore -->
+!!! note
+    The media stack now runs on a Raspberry Pi 5 with Debian 13 and an external HDD at `/srv/media`. See [Raspberry Pi media host](./software/raspberry-pi.md). The Beelink setup below is the original host.
+
 My homelab server is running on [Beelink Mini S12 Pro](https://www.aliexpress.com/item/1005005200158913.html) with Intel 12th Gen 4-Cores N100 (up to 3.4GHz), 16GB of RAM and 500GB of SSD memory.
 
 It can easily run multiple VMs or LXCs, transcode a few 4K streams, while staying quite and consuming only 8.2 watts at idle and 22.5 watts on max load. It's also very small – a little larger than Apple TV box. This combination of characteristics makes it a perfects smart home server.

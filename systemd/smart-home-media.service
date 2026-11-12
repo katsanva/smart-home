@@ -1,0 +1,30 @@
+# Sole owner of media stack startup. Media containers use `restart: on-failure`,
+# so Docker never starts them on boot by itself; this unit starts them only
+# when the expected media disk is mounted and stops them if it disappears.
+#
+# Install with `smart-home install-units`, which fills in @SMART_HOME_DIR@ and
+# @MEDIA_UUID@; see docs/software/raspberry-pi.md.
+
+[Unit]
+Description=Smart Home media stack
+BindsTo=docker.service srv-media.mount
+# Restarting Docker restarts media too
+PartOf=docker.service
+After=docker.service srv-media.mount network-online.target
+Wants=network-online.target
+OnFailure=smart-home-alert@%n.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=SMART_HOME_DIR=@SMART_HOME_DIR@
+# Refuse to start unless the verified disk, not the SD-card mountpoint, is at /srv/media
+ExecStartPre=/usr/bin/findmnt --mountpoint /srv/media --source UUID=@MEDIA_UUID@
+ExecStart=@SMART_HOME_DIR@/bin/smart-home media up
+ExecStop=@SMART_HOME_DIR@/bin/smart-home media stop
+# First start pulls images
+TimeoutStartSec=30min
+
+[Install]
+# docker.service also pulls this unit in, so a Docker restart brings media back
+WantedBy=multi-user.target docker.service

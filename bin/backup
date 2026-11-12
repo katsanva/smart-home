@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# Encrypted application-state snapshot delivered to a private Telegram chat.
+#
+# Briefly stops the media stack, archives $DOCKER (appdata) without caches and
+# logs, encrypts it to the age recipient in backup.env, splits it into parts
+# small enough for the Bot API getFile limit, and uploads parts plus a manifest.
+# The snapshot counts as complete only after the manifest, sent last, is accepted.
+#
+# Usage: SMART_HOME_DIR=... bin/backup
+#        SMART_HOME_DIR=... bin/backup alert <message>    loud message, e.g. systemd OnFailure
+#        SMART_HOME_DIR=... bin/backup notify <message>   silent message
+# alert/notify do not touch backup alert deduplication; callers dedupe their own events.
+
+set -o pipefail
+
+: "${SMART_HOME_DIR:?SMART_HOME_DIR is unset}"
+# shellcheck source=/dev/null
+set -a && . "$SMART_HOME_DIR/backup.env" && set +a || exit 1
+
+# Value of KEY in an env file, parsed like bin/smart-home does
+function env_value() {
+  sed -n "s/^$2=//p" "$1" 2> /dev/null | tail -n 1 | sed 's/[[:space:]]#.*//; s/["'"'"']//g'
+}
+
+DOCKER="$(env_value "$SMART_HOME_DIR/common.env" DOCKER)"
+: "${DOCKER:?DOCKER is unset in common.env}"
+: "${BACKUP_RECIPIENT:?BACKUP_RECIPIENT is unset}"
+: "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is unset}"
+: "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is unset}"
+: "${BACKUP_STAGING:?BACKUP_STAGING is unset}"
+
+PART_SIZE="${BACKUP_PART_SIZE:-19000000}" # below the 20 MB Bot API getFile limit
+# Stacks sharing $DOCKER are stopped, so their databases are archived at rest
+# Same precedence as bin/smart-home: environment first, then common.env
+STOP_STACKS="${BACKUP_STOP_STACKS:-${SMART_HOME_STACKS:-$(env_value "$SMART_HOME_DIR/common.env" SMART_HOME_STACKS)}}"
+[ -n "${STOP_STACKS// /}" ] || {
+  echo "No stacks to stop: set SMART_HOME_STACKS or BACKUP_STOP_STACKS" >&2
+  exit 1
+}
+RETRY_DELAY="${BACKUP_RETRY_DELAY:-30}"
+API="${TELEGRAM_API:-https://api.telegram.org}/bot$TELEGRAM_BOT_TOKEN"
+STATE="$BACKUP_STAGING/state"
+LOCK="$BACKUP_STAGING/.lock"
+STOPPED=() # "stack service" pairs this run stopped and must start again
+ID="snapshot-$(date +%Y%m%d-%H%M%S)"
+DIR="$BACKUP_STAGING/$ID"
+
+# Caches, logs, artwork and app-made backups are regenerable or redundant
+EXCLUDES=(
+  "./plex/Library/Application Support/Plex Media Server/Cache"
+  "./plex/Library/Application Support/Plex Media Server/Codecs"
+  "./plex/Library/Application Support/Plex Media Server/Crash Reports"
+  "./plex/Library/Application Support/Plex Media Server/Diagnostics"
+  "./plex/Library/Application Support/Plex Media Server/Drivers"
+  "./plex/Library/Application Support/Plex Media Server/Logs"
+  "./plex/Library/Application Support/Plex Media Server/Media"
+  "./plex/Library/Application Support/Plex Media Server/Metadata"
+  "./plex/Library/Application Support/Plex Media Server/Updates"
+  logs Logs MediaCover Backups
+)
+
+# Call a Bot API method with retries. The URL (with the token) goes through a
+# curl config file so it never shows up in process arguments or error output.
+function telegram() {
+  local method="$1" attempt out
+  shift
+  for attempt in 1 2 3; do
+    out="$(curl -sS --max-time 600 --config <(printf 'url = "%s/%s"\n' "$API" "$method") "$@" 2>&1)"
+    if grep -q '"ok":true' <<< "$out"; then
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] && sleep $((attempt * RETRY_DELAY))
+  done
+  echo "Telegram $method failed: ${out//$TELEGRAM_BOT_TOKEN/<token>}" >&2
+  return 1
+}
+
+# Loud alert, suppressed while the same problem repeats. If Telegram itself is
+# unreachable, record the failure locally; the next run retries.
+# Send a message (silent when $2 is "silent"). If Telegram is unreachable,
+# record it locally instead.
+function send() {
+  if telegram sendMessage --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "disable_notification=$([ "$2" = silent ] && echo true || echo false)" \
+    --data-urlencode "text=$1"; then
+    return 0
+  fi
+  echo "$(date '+%Y-%m-%dT%H:%M:%S%z') $1" 2> /dev/null >> "$STATE/failures.log" \
+    || echo "Alert not delivered: $1" >&2 # still lands in the journal
+  return 1
+}
+
+# Backup failure alert, suppressed while the same problem repeats
+function alert() {
+  [ "$(cat "$STATE/last-alert" 2> /dev/null)" = "$1" ] && return 0
+  send "$1" && printf '%s' "$1" 2> /dev/null > "$STATE/last-alert"
+}
+
+function upload() {
+  telegram sendDocument -F "chat_id=$TELEGRAM_CHAT_ID" -F disable_notification=true -F "document=@$1"
+}
+
+function stack() {
+  "$SMART_HOME_DIR/bin/smart-home" "$@" 9>&- # children must not hold the lock
+}
+
+# Start exactly the services this run stopped. Runs on exit and on signals too,
+# so an interrupted backup never leaves media down.
+function restart_stopped() {
+  local pair failed=()
+  for pair in "${STOPPED[@]}"; do
+    stack "${pair%% *}" compose start "${pair#* }" > /dev/null || failed+=("$pair")
+  done
+  STOPPED=("${failed[@]}") # keep failed restarts for the exit handler to retry
+  [ "${#failed[@]}" -eq 0 ]
+}
+
+function cleanup() {
+  rm -rf "$DIR/smart-home-env" # plaintext env copies, if interrupted mid-archive
+  restart_stopped || echo "Could not restart: ${STOPPED[*]}" >&2
+  [ -n "$INTERRUPTED" ] && alert "Smart Home backup failed: interrupted"
+}
+
+function archive() {
+  local args=() pattern s services service status
+  for pattern in "${EXCLUDES[@]}"; do
+    args+=(--exclude="$pattern")
+  done
+
+  # Stop running services so databases are consistent. Restarting ones are
+  # included: with restart: on-failure they could come back mid-archive.
+  for s in $STOP_STACKS; do
+    if [ -n "$(env_value "$SMART_HOME_DIR/$s/.env" DOCKER)" ] \
+      && [ "$(env_value "$SMART_HOME_DIR/$s/.env" DOCKER)" != "$DOCKER" ]; then
+      echo "$s/.env overrides DOCKER; backup only supports the common.env appdata" >&2
+      return 1
+    fi
+    services="$(stack "$s" compose ps --services --status running --status restarting)" || return 1
+    for service in $services; do
+      STOPPED+=("$s $service") # record first, so a signal mid-stop still restarts it
+      stack "$s" compose stop "$service" > /dev/null || return 1
+    done
+  done
+
+  # Untracked env files hold secrets needed to recover (API keys, encryption
+  # keys). They go into the encrypted archive under smart-home-env/.
+  local env="$DIR/smart-home-env" file
+  (umask 077 && mkdir "$env") || return 1
+  for file in "$SMART_HOME_DIR"/common.env "$SMART_HOME_DIR"/backup.env "$SMART_HOME_DIR"/*/.env; do
+    [ -f "$file" ] || continue
+    file="${file#"$SMART_HOME_DIR"/}"
+    mkdir -p "$env/$(dirname "$file")" && cp -p "$SMART_HOME_DIR/$file" "$env/$file" || return 1
+  done
+
+  tar -C "$DOCKER" "${args[@]}" -czf - . -C "$DIR" smart-home-env \
+    | age -r "$BACKUP_RECIPIENT" \
+    | split -b "$PART_SIZE" -a 3 - "$DIR/$ID.tar.gz.age."
+  status=$?
+  rm -rf "$DIR/smart-home-env" # no plaintext secrets left in staging
+  [ "$status" -eq 0 ] || return 1
+  restart_stopped
+}
+
+function manifest() {
+  local part
+  {
+    echo "snapshot: $ID"
+    echo "created: $(date '+%Y-%m-%dT%H:%M:%S%z')"
+    echo "parts: $(find "$DIR" -name "$ID.tar.gz.age.*" | wc -l | tr -d ' ')"
+    echo "restore: check every part below, concatenate them in order, decrypt with"
+    echo "  'age -d -i <recovery key>' and extract with 'tar -xzf' (bin/restore does this)."
+    echo "  The archive root is the DOCKER appdata; smart-home-env/ holds the env files."
+    echo "sha256 bytes name"
+    for part in "$DIR/$ID".tar.gz.age.*; do
+      printf '%s %s %s\n' "$(sha256sum "$part" | cut -d ' ' -f 1)" "$(wc -c < "$part" | tr -d ' ')" "$(basename "$part")"
+    done
+  } > "$DIR/$ID.manifest.txt"
+}
+
+function main() {
+  local part
+
+  # Checked before touching staging, so a missing disk never gets files on the SD card
+  if [ -z "$(ls -A "$DOCKER" 2> /dev/null)" ]; then
+    alert "Smart Home backup failed: appdata $DOCKER is missing or empty"
+    return 1
+  fi
+  mkdir -p "$STATE" || return 1
+
+  # One run at a time: overlapping runs would delete each other's staging and
+  # restart services mid-archive. The kernel drops the lock when this process dies.
+  exec 9> "$LOCK" || return 1
+  if ! flock -n 9; then
+    echo "Another backup is running" >&2
+    return 1
+  fi
+
+  mkdir -p "$DIR" || return 1
+  if ! archive || ! manifest; then
+    restart_stopped # bring services back before a possibly slow alert
+    rm -rf "$DIR"   # an older undelivered snapshot, if any, stays staged
+    alert "Smart Home backup failed: could not create snapshot"
+    return 1
+  fi
+
+  # Bounded staging: the new snapshot replaces any older undelivered one
+  find "$BACKUP_STAGING" -maxdepth 1 -name 'snapshot-*' ! -name "$ID" -exec rm -rf {} + || return 1
+  echo "Created $ID: $(du -sh "$DIR" | cut -f 1), $(sed -n 's/^parts: //p' "$DIR/$ID.manifest.txt") part(s)"
+
+  for part in "$DIR/$ID".tar.gz.age.* "$DIR/$ID.manifest.txt"; do
+    if ! upload "$part"; then
+      alert "Smart Home backup failed: Telegram upload incomplete, snapshot kept in $BACKUP_STAGING"
+      return 1
+    fi
+  done
+
+  echo "$ID" > "$STATE/last-success"
+  rm -f "$STATE/last-alert"
+  rm -rf "$DIR"
+  echo "Delivered $ID"
+}
+
+# No mkdir here: with the disk missing, nothing may be written to the SD card
+case "$1" in
+  alert) send "$2"; exit ;;
+  notify) send "$2" silent; exit ;;
+esac
+
+trap cleanup EXIT
+trap 'INTERRUPTED=1; exit 130' INT TERM
+main

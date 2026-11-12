@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Connect the media apps once the stack runs. Run by bin/setup; safe to re-run:
+# existing download clients, root folders and Prowlarr apps are kept.
+#
+# - Radarr and Sonarr: qBittorrent download client (categories radarr and
+#   tv-sonarr) and root folders /data/movies and /data/tv.
+# - Prowlarr: Radarr and Sonarr apps, so indexers added in Prowlarr sync to both,
+#   and FlareSolverr as the proxy for indexers tagged "flaresolverr".
+#
+# Seerr, Bazarr and Plex are set up in their web UIs.
+#
+# Usage: SMART_HOME_DIR=... bin/postinstall
+
+set -uo pipefail
+
+: "${SMART_HOME_DIR:?SMART_HOME_DIR is unset}"
+cd "$SMART_HOME_DIR" || exit 1
+
+function die() {
+  echo "postinstall: $*" >&2
+  exit 1
+}
+
+# Last value of KEY in FILE, without quotes or a trailing " #" comment
+function get_value() {
+  sed -n "s/^$2=//p" "$1" 2> /dev/null | tail -n 1 | sed 's/[[:space:]]#.*//; s/^["'"'"']//; s/["'"'"']$//'
+}
+
+# api <url> <key> <method> <path> [curl args]; the key never appears in process arguments
+function api() {
+  local url="$1" key="$2" method="$3" path="$4"
+  shift 4
+  curl -sSf --max-time 30 -X "$method" --config <(printf 'header = "X-Api-Key: %s"\n' "$key") \
+    -H 'Content-Type: application/json' "$@" "$url/$path"
+}
+
+function wait_api() {
+  local _
+  for _ in $(seq 1 60); do # up to 5 minutes
+    api "$1" "$2" GET "api/$3/system/status" > /dev/null 2>&1 && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# connect_arr <app> <url> <key> <category field> <category> <root folder>
+function connect_arr() {
+  local app="$1" url="$2" key="$3" field="$4" category="$5" root="$6"
+  wait_api "$url" "$key" v3 || die "$app API did not come up"
+
+  if ! api "$url" "$key" GET api/v3/downloadclient | jq -e 'any(.[]; .implementation == "QBittorrent")' > /dev/null; then
+    # Fill the client from the app's own schema, so new fields keep their defaults.
+    # Credentials come from the environment, not jq arguments.
+    api "$url" "$key" GET api/v3/downloadclient/schema \
+      | FIELD="$field" CATEGORY="$category" jq '
+        {host: "qbittorrent", port: 8080, username: env.QBT_USER, password: env.QBT_PASS,
+          (env.FIELD): env.CATEGORY} as $set
+        | first(.[] | select(.implementation == "QBittorrent"))
+        | .name = "qBittorrent" | .enable = true
+        | .fields |= map(. as $f | .value = ($set[$f.name] // $f.value))' \
+      | api "$url" "$key" POST api/v3/downloadclient --data @- > /dev/null \
+      || die "could not add qBittorrent to $app"
+    echo "Added qBittorrent to $app"
+  fi
+
+  if ! api "$url" "$key" GET api/v3/rootfolder \
+    | jq -e --arg p "$root" 'any(.[]; .path == $p or .path == ($p + "/"))' > /dev/null; then
+    jq -n --arg p "$root" '{path: $p}' | api "$url" "$key" POST api/v3/rootfolder --data @- > /dev/null \
+      || die "could not add root folder $root to $app"
+    echo "Added root folder $root to $app"
+  fi
+}
+
+# connect_prowlarr <key> <app> <app url> <app key>
+function connect_prowlarr() {
+  local key="$1" app="$2" app_url="$3"
+  if ! api http://127.0.0.1:9696 "$key" GET api/v1/applications \
+    | jq -e --arg app "$app" 'any(.[]; .implementation == $app)' > /dev/null; then
+    api http://127.0.0.1:9696 "$key" GET api/v1/applications/schema \
+      | APP="$app" APP_URL="$app_url" APP_KEY="$4" jq '
+        # Blocklisted hashes (Cleanuparr) are not grabbed again from another indexer
+        {prowlarrUrl: "http://prowlarr:9696", baseUrl: env.APP_URL, apiKey: env.APP_KEY,
+          syncRejectBlocklistedTorrentHashesWhileGrabbing: true} as $set
+        | first(.[] | select(.implementation == env.APP))
+        | .name = env.APP | .syncLevel = "fullSync"
+        | .fields |= map(. as $f | .value = ($set[$f.name] // $f.value))' \
+      | api http://127.0.0.1:9696 "$key" POST api/v1/applications --data @- > /dev/null \
+      || die "could not add $app to Prowlarr"
+    echo "Added $app to Prowlarr"
+  fi
+}
+
+# Indexers behind Cloudflare challenges get the "flaresolverr" tag in Prowlarr
+function connect_flaresolverr() {
+  local key="$1" url=http://127.0.0.1:9696 tag _
+  tag="$(api "$url" "$key" GET api/v1/tag | jq -r '.[] | select(.label == "flaresolverr") | .id')" || die "could not read Prowlarr tags"
+  if [ -z "$tag" ]; then
+    tag="$(jq -n '{label: "flaresolverr"}' | api "$url" "$key" POST api/v1/tag --data @- | jq -r .id)" \
+      || die "could not create the flaresolverr tag in Prowlarr"
+  fi
+  if ! api "$url" "$key" GET api/v1/indexerproxy | jq -e 'any(.[]; .implementation == "FlareSolverr")' > /dev/null; then
+    # Prowlarr tests the proxy on save, so FlareSolverr must be up first
+    for _ in $(seq 1 60); do
+      curl -sf http://127.0.0.1:8191/ > /dev/null && break
+      sleep 5
+    done
+    curl -sf http://127.0.0.1:8191/ > /dev/null || die "FlareSolverr is not running: start it with smart-home media up"
+    api "$url" "$key" GET api/v1/indexerproxy/schema \
+      | TAG="$tag" jq '
+        first(.[] | select(.implementation == "FlareSolverr"))
+        | .name = "FlareSolverr" | .tags = [env.TAG | tonumber]
+        | .fields |= map(if .name == "host" then .value = "http://flaresolverr:8191/" else . end)' \
+      | api "$url" "$key" POST api/v1/indexerproxy --data @- > /dev/null \
+      || die "could not add FlareSolverr to Prowlarr"
+    echo "Added FlareSolverr to Prowlarr (tag: flaresolverr)"
+  fi
+}
+
+function main() {
+  local radarr sonarr prowlarr file
+  QBT_USER="$(get_value media/.env QBITTORRENT_USER)"
+  QBT_PASS="$(get_value media/.env QBITTORRENT_PASSWORD)"
+  radarr="$(get_value media/.env RADARR_API_KEY)"
+  sonarr="$(get_value media/.env SONARR_API_KEY)"
+  [ -n "$QBT_PASS" ] && [ -n "$radarr" ] && [ -n "$sonarr" ] \
+    || die "QBITTORRENT_*, RADARR_API_KEY and SONARR_API_KEY must be set in media/.env (bin/setup fills them)"
+  export QBT_USER QBT_PASS
+
+  connect_arr Radarr http://127.0.0.1:7878 "$radarr" movieCategory radarr /data/movies
+  connect_arr Sonarr http://127.0.0.1:8989 "$sonarr" tvCategory tv-sonarr /data/tv
+
+  # Prowlarr writes its API key to config.xml on first start
+  file="$(get_value common.env DOCKER)/prowlarr/config.xml"
+  prowlarr="$(sudo sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' "$file" 2> /dev/null)"
+  [ -n "$prowlarr" ] || die "no Prowlarr API key in $file"
+  wait_api http://127.0.0.1:9696 "$prowlarr" v1 || die "Prowlarr API did not come up"
+  connect_prowlarr "$prowlarr" Radarr http://radarr:7878 "$radarr"
+  connect_prowlarr "$prowlarr" Sonarr http://sonarr:8989 "$sonarr"
+  connect_flaresolverr "$prowlarr"
+}
+
+main

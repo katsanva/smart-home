@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Restore a snapshot made by bin/backup from files downloaded from Telegram.
+#
+# Usage: bin/restore <download-dir> <target-dir> <age-identity-file>
+#
+# Every part listed in the manifest must be present with the right size and
+# checksum. The archive is fully decrypted (and so authenticated) before
+# anything is extracted, so a missing, corrupt or wrongly keyed snapshot never
+# produces a partial restore. The target must not exist yet.
+
+set -o pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "Usage: $0 <download-dir> <target-dir> <age-identity-file>" >&2
+  exit 2
+fi
+src="$1" target="$2" identity="$3"
+
+function fail() {
+  echo "Restore failed: $*" >&2
+  exit 1
+}
+
+manifests=("$src"/*.manifest.txt)
+[ "${#manifests[@]}" -eq 1 ] && [ -f "${manifests[0]}" ] || fail "expected exactly one *.manifest.txt in $src"
+manifest="${manifests[0]}"
+[ ! -e "$target" ] || fail "target $target already exists"
+
+parts=()
+while read -r sum bytes name; do
+  [ -f "$src/$name" ] || fail "missing part $name"
+  [ "$(wc -c < "$src/$name" | tr -d ' ')" = "$bytes" ] || fail "wrong size for $name"
+  [ "$(sha256sum "$src/$name" | cut -d ' ' -f 1)" = "$sum" ] || fail "checksum mismatch for $name"
+  parts+=("$src/$name")
+done < <(grep -E '^[0-9a-f]{64} [0-9]+ ' "$manifest")
+
+expected="$(sed -n 's/^parts: //p' "$manifest")"
+[ "${#parts[@]}" -gt 0 ] && [ "${#parts[@]}" = "$expected" ] || fail "manifest lists ${#parts[@]} part(s), expected $expected"
+
+# Work next to the target, so large archives avoid /tmp and the final move is a rename
+mkdir -p "$(dirname "$target")" || fail "cannot create $(dirname "$target")"
+work="$(mktemp -d "$(dirname "$target")/.restore.XXXXXX")" || fail "cannot create temporary directory"
+trap 'rm -rf "$work"' EXIT
+
+cat "${parts[@]}" | age -d -i "$identity" > "$work/archive.tar.gz" || fail "decryption failed"
+mkdir -p "$work/extract" && tar -xzf "$work/archive.tar.gz" -C "$work/extract" || fail "extraction failed"
+mv "$work/extract" "$target" || fail "cannot move restore into $target"
+
+echo "Restored $(sed -n 's/^snapshot: //p' "$manifest") to $target"

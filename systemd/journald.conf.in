@@ -1,0 +1,8 @@
+# Keeps the journal across reboots so an unexpected restart can be traced
+# (journalctl -b -1). The size caps keep it small on the SD card.
+[Journal]
+Storage=persistent
+SystemMaxUse=64M
+SystemMaxFileSize=8M
+# Flush to disk every minute instead of every 5, so a hang loses less
+SyncIntervalSec=1m

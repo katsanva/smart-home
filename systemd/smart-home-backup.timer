@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Smart Home backup
+
+[Timer]
+# System local time (timedatectl set-timezone)
+OnCalendar=*-*-* 04:30:00
+# Run at next boot if the Pi was off at 04:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

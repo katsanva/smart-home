@@ -1,65 +1,234 @@
 name: media
+
+# Fail early instead of substituting empty values. Paths must be absolute.
+x-required:
+  - ${DOCKER:?DOCKER must be set to the absolute appdata directory}
+  - ${MEDIA_VOLUME:?MEDIA_VOLUME must be set to the absolute media directory}
+
+# Containers get only what they need, not every shared secret
+x-environment: &environment
+  TZ: ${TZ:?TZ must be set}
+  PUID: ${PUID:?PUID must be set}
+  PGID: ${PGID:?PGID must be set}
+
+# Bounded json-file logs so containers cannot fill the SD card
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+# Every service has a mem_limit well above its normal use. A runaway container
+# (qBittorrent has spiked to 5 GB) is then killed and restarted on its own,
+# instead of the kernel's OOM killer stalling the whole Pi. Needs memory cgroups,
+# which bin/setup enables in the boot command line.
+
+# Initial services pin version tag + multi-arch index digest (verified to include
+# linux/arm64). Update by changing both deliberately; never rely on :latest.
 services:
   # Plex
   # Personal media server with movies and tv-series
   plex:
     container_name: plex
-    image: lscr.io/linuxserver/plex:latest
-    restart: unless-stopped
+    image: lscr.io/linuxserver/plex:1.43.5.11079-b3b13e506-ls330@sha256:01a53d9c7adcbb3701fbb0a4230c0a37c85453759b6b05a67356c3c7a09de08d
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 2g
+    logging: *logging
     network_mode: host
-    env_file:
-      - ../common.env
-      - .env
     environment:
+      <<: *environment
       VERSION: docker
+      PLEX_CLAIM: ${PLEX_CLAIM:-}
     volumes:
-      - ${PLEX_LIBRARY}/config:/config
-      - ${MEDIA_VOLUME}/data:/media
-      - type: tmpfs
+      - type: bind
+        source: ${DOCKER}/plex
+        target: /config
+        bind:
+          create_host_path: false
+      # Library folders only, read-only: Plex never sees appdata or downloads
+      - type: bind
+        source: ${MEDIA_VOLUME}/movies
+        target: /data/movies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_VOLUME}/tv
+        target: /data/tv
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_VOLUME}/music
+        target: /data/music
+        read_only: true
+        bind:
+          create_host_path: false
+      # Files dropped into the "inbox" Samba share (media/smb.conf.in)
+      - type: bind
+        source: ${MEDIA_VOLUME}/inbox
+        target: /data/inbox
+        read_only: true
+        bind:
+          create_host_path: false
+      # Scratch space for audio conversion and remux segments (full video bitrate).
+      # On the media disk: Plex refuses a session when free space is below the
+      # source size estimate (2.6 GB for a 4K remux), so a RAM tmpfs is too small.
+      # Video transcoding must stay disabled in Plex: the Pi has no hardware encoder.
+      - type: bind
+        source: ${MEDIA_VOLUME}/transcode
         target: /transcode
-        tmpfs:
-          size: 6442450944 # 6 GiB
-          mode: 1777 # /tmp, so Plex can write to it
-    devices:
-      - /dev/dri:/dev/dri
-    group_add:
-      - 44 # video
-      - 104 # render
+        bind:
+          create_host_path: false
     shm_size: 1gb
+
+  # Home Assistant
+  # Home automation. Host network for device discovery (mDNS, SSDP). It listens
+  # only on 127.0.0.1 and the Docker bridge (Settings > System > Network), so
+  # the LAN and the tailnet reach it through Caddy alone, at https://assistant.HOME_DOMAIN
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:2026.11.0@sha256:c6c1ca9931036bf3a2c4cc088d8db25dfea3b33935a5ecc83c40349462e2f69e
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    network_mode: host
+    # Bluetooth adapter: management socket here, BlueZ through /run/dbus below
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # By default home-assistant.log only rolls over at startup, with no size limit
+    entrypoint:
+      - sh
+      - -c
+      - sed -i 's|--config /config$$|--config /config --log-rotate-days 7|' /etc/services.d/home-assistant/run && exec /init
+    environment:
+      TZ: ${TZ:?TZ must be set}
+    volumes:
+      - type: bind
+        source: ${DOCKER}/homeassistant
+        target: /config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /run/dbus
+        target: /run/dbus
+        read_only: true
+        bind:
+          create_host_path: false
 
   # qBittorrent
   # A feature-rich torrent client for downloading media, with a nice web UI
   qbittorrent:
     container_name: qbittorrent
-    image: lscr.io/linuxserver/qbittorrent:latest
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    image: lscr.io/linuxserver/qbittorrent:5.3.0_v2.1.2-ls485@sha256:75ecbb1c89ab7b0a21c4bde40b4820e4f1649d2d56d83b91913422155e8d2a5f
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 2g
+    logging: *logging
     environment:
+      <<: *environment
       WEBUI_PORT: 8080
-      TORRENTING_PORT: 6881
     volumes:
-      - ${DOCKER}/qbittorrent:/config
-      - ${MEDIA_VOLUME}/downloads:/downloads
+      - type: bind
+        source: ${DOCKER}/qbittorrent
+        target: /config
+        bind:
+          create_host_path: false
+      # One /data mount keeps downloads and libraries on one filesystem for hardlinks:
+      # https://wiki.servarr.com/docker-guide#consistent-and-well-planned-paths
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
+    # All torrent traffic goes through the VPN; the WebUI port is published on gluetun
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+
+  # Gluetun
+  # ProtonVPN tunnel for qBittorrent and everything that talks to trackers
+  # (Prowlarr, FlareSolverr, ukr-torznab, cross-seed): they share its network. The ISP gives
+  # no public IPv4 port (DS-Lite), so peers connect in through ProtonVPN's
+  # forwarded port, which gluetun sets as qBittorrent's listening port. Its
+  # firewall is the kill switch: without the VPN these services reach only the
+  # Docker network, never the internet.
+  gluetun:
+    container_name: gluetun
+    image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
+    logging: *logging
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TZ: ${TZ:?TZ must be set}
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${PROTONVPN_WIREGUARD_PRIVATE_KEY:-}
+      # Gluetun picks a random port-forwarding server among these, so the list
+      # stays in Europe, close to the Ukrainian trackers' peers
+      SERVER_COUNTRIES: ${PROTONVPN_SERVER_COUNTRIES:-Switzerland,Spain,Czech Republic,Ukraine,Romania,Bulgaria,Latvia}
+      # The control server's default :8000 is ukr-torznab's port in this network
+      HTTP_CONTROL_SERVER_ADDRESS: :8001
+      HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /auth.toml
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?GLUETUN_API_KEY must be set (bin/setup generates it)}"}'
+      PORT_FORWARD_ONLY: 'on'
+      VPN_PORT_FORWARDING: 'on'
+      # Needs qBittorrent's "bypass authentication for clients on localhost" (bin/setup)
+      VPN_PORT_FORWARDING_UP_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"{{VPN_INTERFACE}}\",\"random_port\":false,\"upnp\":false}"
+        http://127.0.0.1:8080/api/v2/app/setPreferences'
+      # qBittorrent only re-listens after a reconnect if the port is reset first.
+      # It stays on the VPN interface: gluetun does not retry a failed port
+      # forward while the VPN is up, and binding to lo would stop all traffic.
+      VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":0,\"current_network_interface\":\"tun0\"}"
+        http://127.0.0.1:8080/api/v2/app/setPreferences'
+    volumes:
+      - type: bind
+        source: ./gluetun/auth.toml
+        target: /auth.toml
+        read_only: true
+    networks:
+      default:
+        # Other services keep reaching the services in this network by name
+        aliases:
+          - qbittorrent
+          - prowlarr
+          - flaresolverr
+          - ukr-torznab
     ports:
-      - 8080:8080
-      - 6881:6881
-      - 6881:6881/udp
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8080:8080
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:9696:9696
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8191:8191
 
   # Overseerr
   # Nice app for requesting new content
   seerr:
     container_name: seerr
-    image: ghcr.io/seerr-team/seerr:latest
+    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
     init: true
-    restart: unless-stopped
-    env_file:
-      - ../common.env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/overseerr:/app/config
+      - type: bind
+        source: ${DOCKER}/seerr
+        target: /app/config
+        bind:
+          create_host_path: false
     ports:
-      - 5055:5055
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:5055:5055
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/status || exit 1
       start_period: 20s
@@ -70,149 +239,493 @@ services:
   # Radarr
   # A movie collection manager for grabing and downloading movies
   radarr:
-    image: lscr.io/linuxserver/radarr:latest
+    image: lscr.io/linuxserver/radarr:6.4.4.10685-ls324@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: radarr
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/radarr:/config
-      # Media volumes are organized using this guide:
+      - type: bind
+        source: ${DOCKER}/radarr
+        target: /config
+        bind:
+          create_host_path: false
+      # One /data mount keeps downloads and libraries on one filesystem for hardlinks:
       # https://wiki.servarr.com/docker-guide#consistent-and-well-planned-paths
-      - ${MEDIA_VOLUME}:/media
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
     ports:
-      - 7878:7878
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:7878:7878
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
 
   # Sonarr
   # A TV series manager for grabing, sorting and organizing new series
   sonarr:
     container_name: sonarr
-    image: lscr.io/linuxserver/sonarr:latest
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    image: lscr.io/linuxserver/sonarr:4.0.20.3014-ls1@sha256:48e36b608b461273b9dae857725cd0561a127f2c694b687318f6d0c5ce63e5c9
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/sonarr:/config
-      # Media volumes are organized using this guide:
+      - type: bind
+        source: ${DOCKER}/sonarr
+        target: /config
+        bind:
+          create_host_path: false
+      # One /data mount keeps downloads and libraries on one filesystem for hardlinks:
       # https://wiki.servarr.com/docker-guide#consistent-and-well-planned-paths
-      - ${MEDIA_VOLUME}:/media
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
     ports:
-      - 8989:8989
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8989:8989
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
 
   # Prowlarr
   # Indexer manager/proxy for torrent trackers
   prowlarr:
     container_name: prowlarr
-    image: lscr.io/linuxserver/prowlarr:latest
-    restart: unless-stopped
+    image: lscr.io/linuxserver/prowlarr:2.7.0.5723-ls166@sha256:04be30163fbaf48d6aeee7b5893c9f6614ffbad6d853971df0d6dcdf01c7f104
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/prowlarr:/config
+      - type: bind
+        source: ${DOCKER}/prowlarr
+        target: /config
+        bind:
+          create_host_path: false
+    # Searches and .torrent downloads go through the VPN; port published on gluetun
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+
+  # FlareSolverr
+  # Headless browser that solves Cloudflare challenges for Prowlarr indexers
+  # tagged "flaresolverr" (bin/postinstall registers it). Stateless.
+  flaresolverr:
+    container_name: flaresolverr
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1g
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+      LOG_LEVEL: info
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+
+  # ukr-torznab
+  # Torznab indexer for Toloka, UTOPIA and 0day with scene-style release names
+  # that Sonarr/Radarr parse (season packs, audio languages). Prowlarr reaches
+  # it as http://ukr-torznab:8000/toloka, /utp and /0day; no host port. Scrapes Toloka
+  # itself with the account below: the author's shared ElectricSQL feed
+  # (the default) stopped updating, and the API only lists topics seen in the
+  # last 2 days. Built from source: the published image is amd64 only. The fork
+  # adds the open upstream fixes (arm64 image, series year in UTP TV titles, UTP
+  # API key kept out of the request log, short SQLite transactions, Toloka and
+  # qBittorrent re-login, 0day source); go back to upstream once they merge.
+  # Needs a Toloka account, so it starts only with the ukr-torznab profile.
+  ukr-torznab:
+    profiles: [ukr-torznab]
+    container_name: ukr-torznab
+    build: https://github.com/katsanva/ukr-torznab.git#af4352563bab702b7752f4f845562f58a0e4ac44
+    image: ukr-torznab:af43525
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+      TOLOKA_USERNAME: ${TOLOKA_USERNAME:-}
+      TOLOKA_PASSWORD: ${TOLOKA_PASSWORD:-}
+      UTP_API_KEY: ${UTP_API_KEY:-}
+      ZERODAY_USERNAME: ${ZERODAY_USERNAME:-}
+      ZERODAY_PASSWORD: ${ZERODAY_PASSWORD:-}
+      ELECTRIC_URL: ''
+      # Renames UTP and Toloka torrents to their release names (with audio
+      # languages) so imports keep the Ukrainian score. It only picks up torrents
+      # added stopped: Radarr/Sonarr send those indexers to the "qBittorrent (rename)"
+      # download client. No login needed: qBittorrent trusts the Docker network.
+      QBITTORRENT_URL: http://qbittorrent:8080
+      QBITTORRENT_CATEGORIES: radarr,tv-sonarr
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - type: bind
+        source: ${DOCKER}/ukr-torznab
+        target: /data
+        bind:
+          create_host_path: false
+
+  # cross-seed
+  # Finds the torrents qBittorrent already has on the Ukrainian trackers and adds
+  # them there too, as hardlinks under /data/downloads/cross-seed, so the same
+  # files seed on more trackers with no new download. Config: ${DOCKER}/cross-seed/config.js.
+  cross-seed:
+    container_name: cross-seed
+    image: ghcr.io/cross-seed/cross-seed:6.13.9@sha256:9279fa3b4c6f09915614ec819c6dc97e1e844d863b35c009ababd54bad0489d5
+    user: ${PUID:?PUID must be set}:${PGID:?PGID must be set}
+    command: daemon
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+    volumes:
+      - type: bind
+        source: ${DOCKER}/cross-seed
+        target: /config
+        bind:
+          create_host_path: false
+      # Same /data as qBittorrent, so its links are hardlinks on one filesystem
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
+    # Reaches Prowlarr and qBittorrent on localhost; .torrent downloads use the VPN
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+
+  # Caddy
+  # Serves the web UIs on the LAN as http://<name>.local and
+  # https://<name>.HOME_DOMAIN (media/Caddyfile). Caddy with the Cloudflare DNS
+  # module, for Let's Encrypt certificates without inbound ports.
+  caddy:
+    container_name: caddy
+    image: ghcr.io/caddybuilds/caddy-cloudflare:2.11.7@sha256:9c398a17f826530b99e0a68e63ba85f341ddbadc9c2f23668a1aa8f58ce33fb8
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
+    logging: *logging
+    environment:
+      HOME_DOMAIN: ${HOME_DOMAIN:-localhost}
+      CADDY_ACME_DNS: ${CLOUDFLARE_API_TOKEN:+acme_dns cloudflare ${CLOUDFLARE_API_TOKEN}}
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      # certificates and ACME account
+      - type: bind
+        source: ${DOCKER}/caddy
+        target: /data
+        bind:
+          create_host_path: false
     ports:
-      - 9696:9696
+      - ${LAN_BIND_ADDRESS:-127.0.0.2}:80:80
+      - ${LAN_BIND_ADDRESS:-127.0.0.2}:443:443
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex and Home Assistant
+
+  # Pocket ID
+  # Passkey sign-in (OIDC provider) at https://id.HOME_DOMAIN. Admin and users
+  # are created in its web UI; tinyauth is its client for the gated web UIs.
+  pocket-id:
+    container_name: pocket-id
+    image: ghcr.io/pocket-id/pocket-id:v2.19.1@sha256:f085157f0b6ea4b2e8aa5ecfd99eada0d83a4960f3a3dcfd46014097d0ef7ab5
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
+    logging: *logging
+    environment:
+      <<: *environment
+      APP_URL: https://id.${HOME_DOMAIN:-localhost}
+      ENCRYPTION_KEY: ${POCKET_ID_ENCRYPTION_KEY:-} # bin/setup generates it
+      TRUST_PROXY: 'true'
+    volumes:
+      - type: bind
+        source: ${DOCKER}/pocket-id
+        target: /app/data
+        bind:
+          create_host_path: false
+
+  # Tinyauth
+  # Login gate for Caddy (forward_auth) at https://auth.HOME_DOMAIN: signs in
+  # through Pocket ID and sets a cookie for every *.HOME_DOMAIN site.
+  tinyauth:
+    container_name: tinyauth
+    image: ghcr.io/tinyauthapp/tinyauth:v5.2.0@sha256:220aa235c76393a73fece831d7ba967b8698d3907fd8e3c4c952f699c7b142a5
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 128m
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+      TINYAUTH_APPURL: https://auth.${HOME_DOMAIN:-localhost}
+      TINYAUTH_OAUTH_AUTOREDIRECT: pocketid
+      TINYAUTH_AUTH_TRUSTEDPROXIES: 172.16.0.0/12 # Caddy on the Docker network
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME: Pocket ID
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID: ${POCKET_ID_CLIENT_ID:-}
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET: ${POCKET_ID_CLIENT_SECRET:-}
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL: https://id.${HOME_DOMAIN:-localhost}/authorize
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL: https://id.${HOME_DOMAIN:-localhost}/api/oidc/token
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL: https://id.${HOME_DOMAIN:-localhost}/api/oidc/userinfo
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL: https://auth.${HOME_DOMAIN:-localhost}/api/oauth/callback/pocketid
+      TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES: openid email profile groups
+    volumes:
+      - type: bind
+        source: ${DOCKER}/tinyauth
+        target: /data
+        bind:
+          create_host_path: false
+
+  # Homepage
+  # Dashboard for the media apps at http://home.local (media/homepage/*.yaml)
+  homepage:
+    container_name: homepage
+    image: ghcr.io/gethomepage/homepage:v2.7.0@sha256:19c5c09184458a41b7b5915e71463a39f36cd33540f41bdbed008791b8182d5f
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 256m
+    logging: *logging
+    environment:
+      <<: *environment
+      HOMEPAGE_ALLOWED_HOSTS: home.local,${HOME_DOMAIN:-localhost}
+      HOMEPAGE_VAR_HOME_DOMAIN: ${HOME_DOMAIN:-localhost}
+      LOG_TARGETS: stdout
+      HOMEPAGE_VAR_RADARR_KEY: ${RADARR_API_KEY:-}
+      HOMEPAGE_VAR_SONARR_KEY: ${SONARR_API_KEY:-}
+      HOMEPAGE_VAR_PROWLARR_KEY: ${PROWLARR_API_KEY:-}
+      HOMEPAGE_VAR_BAZARR_KEY: ${BAZARR_API_KEY:-}
+      HOMEPAGE_VAR_SEERR_KEY: ${SEERR_API_KEY:-}
+      HOMEPAGE_VAR_PLEX_TOKEN: ${PLEX_TOKEN:-}
+      HOMEPAGE_VAR_QBITTORRENT_USER: ${QBITTORRENT_USER:-}
+      HOMEPAGE_VAR_QBITTORRENT_PASSWORD: ${QBITTORRENT_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ./homepage/settings.yaml
+        target: /app/config/settings.yaml
+        read_only: true
+      - type: bind
+        source: ./homepage/services.yaml
+        target: /app/config/services.yaml
+        read_only: true
+      - type: bind
+        source: ./homepage/widgets.yaml
+        target: /app/config/widgets.yaml
+        read_only: true
+      - type: bind
+        source: ./homepage/bookmarks.yaml
+        target: /app/config/bookmarks.yaml
+        read_only: true
+      # disk usage widget only
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        read_only: true
+    ports:
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:3000:3000
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
+
+  # TorrServer
+  # Streams torrents to players over HTTP without downloading them first.
+  # LAN only: bound to LAN_BIND_ADDRESS (the Pi's LAN IP).
+  # Bridge network: no DLNA, and peers cannot connect in.
+  torrserver:
+    container_name: torrserver
+    image: ghcr.io/yourok/torrserver:MatriX.148@sha256:08461086e30832e1497c2ff1d57ea723d8f18b3ad6f0f0d0f956bfe58c3e85ba
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 1536m
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+      TS_CONF_PATH: /opt/ts/config
+      TS_TORR_DIR: /opt/ts/torrents
+    volumes:
+      - type: bind
+        source: ${DOCKER}/torrserver
+        target: /opt/ts
+        bind:
+          create_host_path: false
+    ports:
+      - ${LAN_BIND_ADDRESS:-127.0.0.1}:8090:8090
 
   # Bazarr
   # Companion that manages and downloads subtitles based on your requirements
   bazarr:
     container_name: bazarr
-    # FIXME: Move back to latest once v1.5.7 is released
-    # image: lscr.io/linuxserver/bazarr:latest
-    image: ghcr.io/linuxserver/bazarr:development
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    image: lscr.io/linuxserver/bazarr:v1.6.2-ls370@sha256:9a625883f054e722795affe5e3ca71057e6ed817ecdf99f4a99624346fcc509c
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/bazarr:/config
-      - ${MEDIA_VOLUME}:/media
+      - type: bind
+        source: ${DOCKER}/bazarr
+        target: /config
+        bind:
+          create_host_path: false
+      # Same library paths as Sonarr/Radarr, writable for subtitle files
+      - type: bind
+        source: ${MEDIA_VOLUME}/movies
+        target: /data/movies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_VOLUME}/tv
+        target: /data/tv
+        bind:
+          create_host_path: false
     ports:
-      - 6767:6767
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:6767:6767
 
   # Trailarr
   # A tool download and manage trailers for Radarr and Sonarr libraries
   trailarr:
+    profiles: [extras]
     container_name: trailarr
     image: nandyalu/trailarr:latest
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
-    environment:
-      - WEBUI_DISABLE_AUTH=True
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/trailarr:/config
-      - ${MEDIA_VOLUME}:/media
+      - type: bind
+        source: ${DOCKER}/trailarr
+        target: /config
+        bind:
+          create_host_path: false
+      # same paths as Radarr/Sonarr
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
     ports:
-      - 7889:7889
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:7889:7889
 
   # Maintainerr
   # Cleaning up (un)watched media
   maintainerr:
+    profiles: [extras]
     container_name: maintainerr
     image: ghcr.io/maintainerr/maintainerr:latest
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/maintainerr:/opt/data
+      - type: bind
+        source: ${DOCKER}/maintainerr
+        target: /opt/data
+        bind:
+          create_host_path: false
     ports:
-      - 6246:6246
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:6246:6246
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
 
   # Agregarr
   # Group and organize media in collections, add poster overlays and more
   agregarr:
+    profiles: [extras]
     container_name: agregarr
     image: bitr8/agregarr:develop
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/agregarr:/app/config
+      - type: bind
+        source: ${DOCKER}/agregarr
+        target: /app/config
+        bind:
+          create_host_path: false
     ports:
-      - 7171:7171
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:7171:7171
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
 
   # Cleanuparr
   # Automatically clean up unwanted, stalled, and malicious downloads from *arr applications.
+  # Always on: removes stalled downloads, blocklists them and triggers a new search.
   cleanuparr:
     image: ghcr.io/cleanuparr/cleanuparr:latest
     container_name: cleanuparr
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/cleanuparr:/config
-      - ${MEDIA_VOLUME}/downloads:/downloads # for monitoring orphaned downloads
+      - type: bind
+        source: ${DOCKER}/cleanuparr
+        target: /config
+        bind:
+          create_host_path: false
+      # same path as qBittorrent, for orphaned downloads
+      - type: bind
+        source: ${MEDIA_VOLUME}/downloads
+        target: /data/downloads
+        bind:
+          create_host_path: false
     ports:
-      - 11011:11011
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:11011:11011
 
   # Tautulli
   # A monitoring and tracking tool for Plex Media Server
   tautulli:
+    profiles: [extras]
     container_name: tautulli
     image: ghcr.io/tautulli/tautulli
-    restart: unless-stopped
-    env_file: .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/tautulli:/config
+      - type: bind
+        source: ${DOCKER}/tautulli
+        target: /config
+        bind:
+          create_host_path: false
     ports:
-      - 8181:8181
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:8181:8181
+    extra_hosts:
+      - host.docker.internal:host-gateway # reach host-networked Plex
 
   # Audiobookshelf
   # Self-hosted audiobook and podcast server
   audiobookshelf:
+    profiles: [extras]
     container_name: audiobookshelf
     image: ghcr.io/advplyr/audiobookshelf:latest
-    restart: unless-stopped
-    env_file:
-      - ../common.env
-      - .env
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment: *environment
     volumes:
-      - ${DOCKER}/audiobookshelf/config:/config
-      - ${DOCKER}/audiobookshelf/metadata:/metadata
-      - ${MEDIA_VOLUME}:/media
+      - type: bind
+        source: ${DOCKER}/audiobookshelf/config
+        target: /config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCKER}/audiobookshelf/metadata
+        target: /metadata
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /media
+        bind:
+          create_host_path: false
     ports:
-      - 13378:80
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:13378:80

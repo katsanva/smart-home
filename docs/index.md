@@ -33,13 +33,11 @@ Also, checkout my Home Assistant configuration:
 
 My home setup for those who are too lazy to read everything:
 
-- [Proxmox](https://www.proxmox.com/) run on [Beelink Mini S12 Pro](https://www.aliexpress.com/item/1005005200158913.html) as a home server.
-- Reverse proxy using [Nginx Proxy Manager](https://nginxproxymanager.com/) with [CloudFlare](https://www.cloudflare.com/).
-- [Wireguard VPN](https://www.wireguard.com/) for SSH, Samba and development using [VSCode Remote Containers](https://code.visualstudio.com/docs/devcontainers/containers).
-- [Pi-hole](https://pi-hole.net) for blocking ads within home network.
+- [Raspberry Pi 5](https://www.raspberrypi.com/products/raspberry-pi-5/) with Debian 13 as the media host, reached over [Tailscale](https://tailscale.com/). See [Raspberry Pi media host](./software/raspberry-pi.md).
+- Originally: [Proxmox](https://www.proxmox.com/) on [Beelink Mini S12 Pro](https://www.aliexpress.com/item/1005005200158913.html), with [Nginx Proxy Manager](https://nginxproxymanager.com/), [Wireguard VPN](https://www.wireguard.com/) and [Pi-hole](https://pi-hole.net). These are not part of this repository's Pi setup.
 - [Plex Media Server](https://www.plex.tv/media-server-downloads/#plex-media-server) with an external hard drive for hosting movies and TV series.
 - [Radarr + Sonarr + Prowlarr + Bazarr](https://wiki.servarr.com/) tools for media management.
-- [Transmission](https://transmissionbt.com/) for downloading new media to the hard drive.
+- [qBittorrent](https://www.qbittorrent.org/) for downloading new media to the hard drive.
 - [Vaultwarden](https://github.com/dani-garcia/vaultwarden) for password management (Rust implementation of [Bitwarden](https://bitwarden.com/)).
 
 ## Motivation

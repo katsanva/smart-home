@@ -1,0 +1,6 @@
+# Gluetun control server: Homepage reads the public IP and forwarded port
+# without a key. Every other route needs GLUETUN_API_KEY (media/.env).
+[[roles]]
+name = "homepage"
+routes = ["GET /v1/publicip/ip", "GET /v1/portforward", "GET /v1/openvpn/portforwarded"]
+auth = "none"

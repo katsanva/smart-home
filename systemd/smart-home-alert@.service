@@ -1,0 +1,9 @@
+# Telegram alert for a failed unit, used through OnFailure=smart-home-alert@%n.service
+
+[Unit]
+Description=Smart Home failure alert for %i
+
+[Service]
+Type=oneshot
+Environment=SMART_HOME_DIR=@SMART_HOME_DIR@
+ExecStart=@SMART_HOME_DIR@/bin/backup alert "Smart Home unit %i failed, see: journalctl -u %i"

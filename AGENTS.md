@@ -11,8 +11,7 @@ This is a Docker-based smart home infrastructure using a stack-oriented architec
 
 ## System Overview
 
-This is an Ubuntu system running as an LXC container on a Proxmox machine.
-The host is a Beelink S12 Pro with 16GB RAM and 500GB storage.
+The media stack runs on a Raspberry Pi 5 with Debian 13 (ARM64), the media disk mounted at `/srv/media`, and Tailscale for remote access. Only the `media` stack is enabled (`SMART_HOME_STACKS=media`); the other stacks are kept from the original Intel/Proxmox host and are not maintained for the Pi. See `docs/software/raspberry-pi.md`.
 
 ## Key Patterns
 
@@ -20,42 +19,41 @@ The host is a Beelink S12 Pro with 16GB RAM and 500GB storage.
 
 - `common.env.example` is the non-secret template for reference; actual `common.env` contains secret shared config and must never be committed to git.
 - Stack-specific `.env` files contain secrets and must never be committed to git.
-- Docker Compose uses: `--env-file .env --env-file $SMART_HOME_DIR/common.env`.
+- Docker Compose uses: `--env-file $SMART_HOME_DIR/common.env --env-file .env`; later files win, so stack `.env` overrides `common.env`.
 
 ### Critical Variables
 
-- `${DOCKER}` - data directory
-- `${STORAGE}` - host mounts
+- `${DOCKER}` - app data directory (`/srv/media/appdata` on the Pi)
+- `${MEDIA_VOLUME}` - media disk mount (`/srv/media`), mounted as `/data` in media containers
+- `${STORAGE}` - host mounts (other stacks)
 - `${PUBLIC_DOMAIN}` - domain for services publicly available over the internet
 - `${PRIVATE_DOMAIN}` - domain for services only accessible within the local network
 
 ### Service Dependencies
 
-- **Network services**: Nginx Proxy Manager (ports 80/443) routes to internal services.
-- **Authentication**: Pocket ID provides OIDC for services like Mealie, Paperless, and Wallos.
-- **Monitoring**: Watchtower auto-updates containers, and Uptime Kuma monitors services.
+- **Network services**: Media web UIs bind to `127.0.0.1`; Caddy serves them on the Pi's LAN IP (`LAN_BIND_ADDRESS`) as `https://<name>.<HOME_DOMAIN>` behind a Pocket ID sign-in (tinyauth). Home LAN only, never served on the tailnet; do not publish app ports on the LAN IP, or the sign-in can be skipped. Nginx Proxy Manager, Pi-hole and WireGuard are external and not part of this checkout.
+- **Authentication**: Pocket ID (media stack) signs in to the gated media web UIs through tinyauth; on the original host it provided OIDC for Mealie, Paperless and Wallos.
+- **Updates and monitoring**: The media stack has no automatic image updates; images change only on `smart-home media update`. Digest-pinned services move only when their pins are edited, while `:latest` images move on every update run. On the original host, Watchtower (support stack) auto-updates containers and Uptime Kuma monitors services; on the Pi, systemd units alert via Telegram.
 
 ### Volume Patterns
 
 - `${DOCKER}/service-name:/container/config` for persistent app data.
-- `${STORAGE}/media:/media` for shared media files using Servarr conventions.
+- `${MEDIA_VOLUME}:/data` single mount for media files and downloads, so hardlinks work (Servarr conventions).
 - `/var/run/docker.sock` mounted for container management tools.
 
 ### Storage Layout
 
 ```text
-.
-├── dump
-└── media
-    ├── data
-    │   ├── movies
-    │   └── tv
-    ├── downloads
-    │   ├── movies
-    │   └── tv
-    └── paperless
-        ├── documents
-        └── media.lock
+/srv/media
+├── appdata        # ${DOCKER}, per-service config
+├── backup-staging # encrypted backup parts
+├── downloads
+│   ├── complete
+│   └── incomplete
+├── inbox          # Samba drop folder, extra Plex library folders
+├── movies
+├── music
+└── tv
 ```
 
 ## CLI Workflow
@@ -63,10 +61,10 @@ The host is a Beelink S12 Pro with 16GB RAM and 500GB storage.
 The `smart-home` script is central to all operations:
 
 ```bash
-# Manage all stacks
-smart-home up                    # Start all services
-smart-home update                # Pull, build, and restart all
-smart-home down                  # Stop all stacks
+# Manage all enabled stacks (SMART_HOME_STACKS in common.env)
+smart-home up                    # Start enabled stacks
+smart-home update                # Pull, build, and restart enabled stacks
+smart-home down                  # Stop enabled stacks
 
 # Manage a specific stack
 smart-home media up              # Start only media stack
@@ -83,24 +81,22 @@ Only `smart-home` handles environment file loading and stack context properly.
 
 ## Service Integration Points
 
-### Reverse Proxy (Nginx Proxy Manager)
+### Remote Access (Tailscale)
 
-- Exposes services on `${PUBLIC_DOMAIN}` subdomains.
-- SSL certificates are managed through Let's Encrypt.
-- Web UI runs on port 8081.
+- Tailscale carries Plex and SSH only. Media web UIs stay on the home LAN; do not add `tailscale serve`.
 
 ### Media Pipeline
 
-- Overseerr: Request interface to Radarr/Sonarr.
+- Seerr: Request interface to Radarr/Sonarr.
 - Prowlarr: Indexer management for all Arr apps.
-- Transmission: Download client with organized paths (`/media/downloads`).
+- qBittorrent: Download client (`/data/downloads`).
+- `bin/space-guard` pauses grabs and downloads when the media disk is nearly full.
 - File structure follows the [Servarr guide](https://wiki.servarr.com/docker-guide#consistent-and-well-planned-paths).
 
 ### Authentication And Security
 
-- Pocket ID: OIDC provider for SSO across services.
-- Pi-hole: DNS-level ad blocking (ports 53, 5300).
-- Wireguard: VPN access (ports 51820/51821).
+- Pocket ID: passkey sign-in for the media web UIs (media stack, `https://id.<HOME_DOMAIN>`), through tinyauth and Caddy `forward_auth`.
+- Pi-hole and WireGuard: external, not part of this checkout.
 
 ## Documentation System
 
@@ -114,7 +110,7 @@ Only `smart-home` handles environment file loading and stack context properly.
 - **Add new stack**: Create `new-stack/compose.yml`, add environment variables, and update docs.
 - **Update secrets**: Edit the stack's `.env` file and restart affected services.
 - **Scale resources**: Modify `deploy.resources.limits` in compose files.
-- **Backup strategy**: Use Backrest service (port 9898) for automated backups to external storage.
+- **Backups**: `bin/backup` (systemd timer) sends age-encrypted appdata snapshots to Telegram; `bin/restore` restores them. Backrest (support stack, port 9898) served the original host.
 
 When working with this codebase, always consider stack boundaries and the shared environment impact of changes.
 
