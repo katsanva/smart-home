@@ -150,7 +150,7 @@ services:
 
   # Gluetun
   # ProtonVPN tunnel for qBittorrent and everything that talks to trackers
-  # (Prowlarr, FlareSolverr, ukr-torznab): they share its network. The ISP gives
+  # (Prowlarr, FlareSolverr, ukr-torznab, cross-seed): they share its network. The ISP gives
   # no public IPv4 port (DS-Lite), so peers connect in through ProtonVPN's
   # forwarded port, which gluetun sets as qBittorrent's listening port. Its
   # firewall is the kill switch: without the VPN these services reach only the
@@ -374,6 +374,39 @@ services:
         target: /data
         bind:
           create_host_path: false
+
+  # cross-seed
+  # Finds the torrents qBittorrent already has on the Ukrainian trackers and adds
+  # them there too, as hardlinks under /data/downloads/cross-seed, so the same
+  # files seed on more trackers with no new download. Config: ${DOCKER}/cross-seed/config.js.
+  cross-seed:
+    container_name: cross-seed
+    image: ghcr.io/cross-seed/cross-seed:6.13.9@sha256:9279fa3b4c6f09915614ec819c6dc97e1e844d863b35c009ababd54bad0489d5
+    user: ${PUID:?PUID must be set}:${PGID:?PGID must be set}
+    command: daemon
+    restart: on-failure # boot startup is owned by systemd/smart-home-media.service
+    mem_limit: 512m
+    logging: *logging
+    environment:
+      TZ: ${TZ:?TZ must be set}
+    volumes:
+      - type: bind
+        source: ${DOCKER}/cross-seed
+        target: /config
+        bind:
+          create_host_path: false
+      # Same /data as qBittorrent, so its links are hardlinks on one filesystem
+      - type: bind
+        source: ${MEDIA_VOLUME}
+        target: /data
+        bind:
+          create_host_path: false
+    # Reaches Prowlarr and qBittorrent on localhost; .torrent downloads use the VPN
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
 
   # Caddy
   # Serves the web UIs on the LAN as http://<name>.local and
