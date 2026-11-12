@@ -10,6 +10,8 @@ stacks="$(sed -n 's/^SMART_HOME_STACKS=//p' common.env.example | tail -n 1 | sed
   exit 1
 }
 failures=0
+# Secrets that compose requires but the examples leave empty (bin/setup generates them)
+export GLUETUN_API_KEY=test
 
 for stack in $stacks; do
   for profiles in "" "*"; do
