@@ -13,6 +13,13 @@ echo "SMART_HOME_STACKS=apps media # nvr disabled" > "$TMP/home/common.env"
 cat > "$TMP/bin/docker" << 'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "CALL $(basename "$PWD")" "$@" >> "$DOCKER_LOG"
+# Canned answers for the network namespace check: container ids come from
+# DOCKER_PS, and MODE_<id> / NS_<id> give each one's network mode and namespace.
+case "$1" in
+  ps) [ -z "${DOCKER_PS:-}" ] || printf '%s\n' $DOCKER_PS ;;
+  inspect) mode="MODE_$4" && case "$3" in *NetworkMode*) echo "${!mode:-}" ;; *) echo "/$4" ;; esac ;;
+  exec) ns="NS_$2" && echo "${!ns:-}" ;;
+esac
 exit "${DOCKER_EXIT:-0}"
 EOF
 cat > "$TMP/bin/sudo" << 'EOF'
@@ -71,7 +78,13 @@ run media up
 check "stack .env is loaded after common.env" '[ "$(sed -n 3,6p "$DOCKER_LOG")" = "$(printf "%s\n" --env-file "$TMP/home/common.env" --env-file .env)" ]'
 
 run up
-check "all-stack command uses only enabled stacks" '[ $status -eq 0 ] && [ "$(grep "^CALL " "$DOCKER_LOG")" = "$(printf "CALL %s\n" apps media)" ]'
+check "all-stack command uses only enabled stacks" '[ $status -eq 0 ] && [ "$(grep -A1 "^CALL " "$DOCKER_LOG" | grep -B1 -x compose | grep "^CALL ")" = "$(printf "CALL %s\n" apps media)" ]'
+
+export DOCKER_PS="qbit prowl gluetun" MODE_qbit=container:gluetun MODE_prowl=container:gluetun MODE_gluetun=bridge
+export NS_gluetun="net:[2]" NS_prowl="net:[2]" NS_qbit="net:[1]"
+run media up
+check "up restarts only containers on a stale shared network namespace" '[ $status -eq 0 ] && [ "$(grep -cx restart "$DOCKER_LOG")" -eq 1 ] && grep -A3 -x restart "$DOCKER_LOG" | grep -qx qbit'
+unset DOCKER_PS MODE_qbit MODE_prowl MODE_gluetun NS_gluetun NS_prowl NS_qbit
 
 SMART_HOME_STACKS="" run up
 check "empty enabled stacks fails" '[ $status -ne 0 ] && [ "$(calls)" -eq 0 ]'

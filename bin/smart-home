@@ -90,7 +90,25 @@ function smart-home:docker:compose() {
 
 # --remove-orphans drops containers of services deleted from compose.yml
 function smart-home:docker:up() {
-  smart-home:docker:compose up -d --remove-orphans "$@"
+  smart-home:docker:compose up -d --remove-orphans "$@" || return
+  smart-home:docker:rejoin_netns
+}
+
+# A container with network_mode: service:<x> keeps the namespace <x> had when it
+# started. If the daemon restarts <x> (restart policy, not compose), restart: true
+# never fires and the dependent stays on a dead namespace, unreachable. Restart those.
+function smart-home:docker:rejoin_netns() {
+  local id mode want have
+  for id in $(docker ps -q); do
+    mode="$(docker inspect -f "{{.HostConfig.NetworkMode}}" "$id")"
+    [[ "$mode" == container:* ]] || continue
+    want="$(docker exec "${mode#container:}" readlink /proc/1/ns/net 2>/dev/null)" || continue
+    have="$(docker exec "$id" readlink /proc/1/ns/net 2>/dev/null)" || continue
+    if [ "$want" != "$have" ]; then
+      echo "Restarting $(docker inspect -f "{{.Name}}" "$id" | tr -d /) (stale network namespace)..."
+      docker restart -t 120 "$id" > /dev/null
+    fi
+  done
 }
 
 function smart-home:docker:stop() {
