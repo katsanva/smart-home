@@ -345,7 +345,7 @@ services:
   ukr-torznab:
     profiles: [ukr-torznab]
     container_name: ukr-torznab
-    image: ghcr.io/katsanva/ukr-torznab:sha-c045eb5@sha256:b4a78eb8f3da27b3c19478e7c341ccc6d7c5fa8507b8c54d8f3e453c63f2b381
+    image: ghcr.io/katsanva/ukr-torznab:sha-c141eb5@sha256:d690dfcc22df4ba6066fa249ff6d25c51cbfc334565ebed108c6756e58550f79
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
     mem_limit: 512m
     logging: *logging
