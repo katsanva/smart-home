@@ -339,12 +339,13 @@ services:
   # last 2 days. Uses the fork's image (amd64 and arm64; upstream publishes amd64
   # only). The fork adds the open upstream fixes (arm64 image, series year in UTP
   # TV titles, UTP API key kept out of the request log, short SQLite transactions,
-  # Toloka and qBittorrent re-login, 0day source); go back to upstream once they
-  # merge. Needs a Toloka account, so it starts only with the ukr-torznab profile.
+  # IMDB titles in their own file (/data/imdb.db) so the write-ahead log stays
+  # small, Toloka and qBittorrent re-login, 0day source); go back to upstream once
+  # they merge. Needs a Toloka account, so it starts only with the ukr-torznab profile.
   ukr-torznab:
     profiles: [ukr-torznab]
     container_name: ukr-torznab
-    image: ghcr.io/katsanva/ukr-torznab:sha-548e482@sha256:4bb37cb90050d6f6777affead2c43e036ad724ef15db7141c9ffaa25bd7480a2
+    image: ghcr.io/katsanva/ukr-torznab:sha-3ac8601@sha256:79add23d1b022febdca59bda7104dfe3f7da9dc310e29c153d7d556ea26d1ec0
     restart: on-failure # boot startup is owned by systemd/smart-home-media.service
     mem_limit: 512m
     logging: *logging
