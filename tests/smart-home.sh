@@ -17,7 +17,7 @@ printf '%s\n' "CALL $(basename "$PWD")" "$@" >> "$DOCKER_LOG"
 # DOCKER_PS, and MODE_<id> / NS_<id> give each one's network mode and namespace.
 case "$1" in
   ps) [ -z "${DOCKER_PS:-}" ] || printf '%s\n' $DOCKER_PS ;;
-  inspect) mode="MODE_$4" && case "$3" in *NetworkMode*) echo "${!mode:-}" ;; *) echo "/$4" ;; esac ;;
+  inspect) mode="MODE_$4" && case "$3" in *NetworkMode*) echo "${!mode:-}" ;; *compose.service*) echo "$4" ;; *) echo "/$4" ;; esac ;;
   exec) ns="NS_$2" && echo "${!ns:-}" ;;
 esac
 exit "${DOCKER_EXIT:-0}"
@@ -83,7 +83,12 @@ check "all-stack command uses only enabled stacks" '[ $status -eq 0 ] && [ "$(gr
 export DOCKER_PS="qbit prowl gluetun" MODE_qbit=container:gluetun MODE_prowl=container:gluetun MODE_gluetun=bridge
 export NS_gluetun="net:[2]" NS_prowl="net:[2]" NS_qbit="net:[1]"
 run media up
-check "up restarts only containers on a stale shared network namespace" '[ $status -eq 0 ] && [ "$(grep -cx restart "$DOCKER_LOG")" -eq 1 ] && grep -A3 -x restart "$DOCKER_LOG" | grep -qx qbit'
+check "up recreates only containers on a stale shared network namespace" '[ $status -eq 0 ] && [ "$(grep -cx -- --force-recreate "$DOCKER_LOG")" -eq 1 ] && [ "$(tail -n 1 "$DOCKER_LOG")" = qbit ]'
+
+# gluetun recreated alone: qbit still points at the removed container id
+export MODE_qbit=container:old-gluetun
+run media up
+check "up recreates containers whose namespace owner was removed" '[ $status -eq 0 ] && [ "$(tail -n 1 "$DOCKER_LOG")" = qbit ] && grep -qx -- --force-recreate "$DOCKER_LOG"'
 unset DOCKER_PS MODE_qbit MODE_prowl MODE_gluetun NS_gluetun NS_prowl NS_qbit
 
 SMART_HOME_STACKS="" run up

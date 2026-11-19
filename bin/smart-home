@@ -95,20 +95,22 @@ function smart-home:docker:up() {
 }
 
 # A container with network_mode: service:<x> keeps the namespace <x> had when it
-# started. If the daemon restarts <x> (restart policy, not compose), restart: true
-# never fires and the dependent stays on a dead namespace, unreachable. Restart those.
+# started. If the daemon restarts <x> (restart policy, not compose), or compose
+# recreates <x> alone (new container id), the dependent stays on a dead namespace,
+# unreachable. Recreate those so they join <x>'s current namespace.
 function smart-home:docker:rejoin_netns() {
-  local id mode want have
-  for id in $(docker ps -q); do
+  local id mode want have stale=()
+  for id in $(docker ps -q --filter "label=com.docker.compose.project.working_dir=$PWD"); do
     mode="$(docker inspect -f "{{.HostConfig.NetworkMode}}" "$id")"
     [[ "$mode" == container:* ]] || continue
-    want="$(docker exec "${mode#container:}" readlink /proc/1/ns/net 2>/dev/null)" || continue
     have="$(docker exec "$id" readlink /proc/1/ns/net 2>/dev/null)" || continue
-    if [ "$want" != "$have" ]; then
-      echo "Restarting $(docker inspect -f "{{.Name}}" "$id" | tr -d /) (stale network namespace)..."
-      docker restart -t 120 "$id" > /dev/null
-    fi
+    # Empty when <x> is gone: the dependent still points at the removed container
+    want="$(docker exec "${mode#container:}" readlink /proc/1/ns/net 2>/dev/null)"
+    [ "$want" = "$have" ] || stale+=("$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$id")")
   done
+  [ ${#stale[@]} -eq 0 ] && return
+  echo "Recreating ${stale[*]} (stale network namespace)..."
+  smart-home:docker:compose up -d --no-deps --force-recreate "${stale[@]}"
 }
 
 function smart-home:docker:stop() {
